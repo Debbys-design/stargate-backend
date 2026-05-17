@@ -1,0 +1,20 @@
+[package]
+name = "stargate-reconciler"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+backoff = { version = "0.4", features = ["tokio"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+redis = { version = "0.25", features = ["tokio-comp"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+rust_decimal = { version = "1.36", features = ["db-postgres"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.7", features = ["postgres", "runtime-tokio", "uuid", "rust_decimal", "chrono"] }
+tokio = { version = "1.39", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.10", features = ["serde", "v4"] }

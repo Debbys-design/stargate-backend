@@ -1,0 +1,60 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: stargate_test
+          POSTGRES_USER: stargate
+          POSTGRES_PASSWORD: test
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 5
+      redis:
+        image: redis:7
+        options: --health-cmd "redis-cli ping" --health-interval 5s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run db:migrate
+        env:
+          DATABASE_URL: postgresql://stargate:test@localhost:5432/stargate_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: minimum-32-chars-high-entropy-secret
+          STELLAR_ASSET_ISSUER: G...
+          PLATFORM_TREASURY_PUBLIC_KEY: G...
+          HORIZON_URL: https://horizon-testnet.stellar.org
+      - run: npm test
+      - run: npm run test:e2e
+      - run: npm run generate:openapi
+      - run: npm run publish:types
+        if: github.ref == 'refs/heads/main'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  reconciler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: reconciler
+      - run: cargo fmt --all -- --check
+        working-directory: reconciler
+      - run: cargo clippy -- -D warnings
+        working-directory: reconciler
+      - run: cargo test
+        working-directory: reconciler

@@ -1,0 +1,9 @@
+FROM rust:1.78 AS build
+WORKDIR /app/reconciler
+COPY reconciler/Cargo.toml .
+COPY reconciler/src ./src
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+COPY --from=build /app/reconciler/target/release/stargate-reconciler /usr/local/bin/stargate-reconciler
+CMD ["stargate-reconciler"]
