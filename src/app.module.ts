@@ -6,6 +6,7 @@ import { AuthModule } from './auth/auth.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { validate } from './config/validate';
 import { DatabaseModule } from './database/database.module';
+import { HealthModule } from './health/health.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { MerchantsModule } from './merchants/merchants.module';
 import { PaymentsModule } from './payments/payments.module';
@@ -28,6 +29,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     }),
     DatabaseModule,
     RedisModule,
+    HealthModule,
     AuthModule,
     MerchantsModule,
     StellarModule,
