@@ -1,0 +1,76 @@
+name: Deploy Backend Production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      IMAGE_NAME: ghcr.io/dreamgenex/stargate-backend
+      DATABASE_DIRECT_URL: ${{ secrets.DATABASE_DIRECT_URL }}
+      PRODUCTION_DEPLOY_HOOK_URL: ${{ secrets.PRODUCTION_DEPLOY_HOOK_URL }}
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: stargate_test
+          POSTGRES_USER: stargate
+          POSTGRES_PASSWORD: test
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 5
+      redis:
+        image: redis:7
+        options: --health-cmd "redis-cli ping" --health-interval 5s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          DATABASE_URL: postgresql://stargate:test@localhost:5432/stargate_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: minimum-32-chars-high-entropy-secret
+          STELLAR_ASSET_ISSUER: G_TEST_ISSUER
+          PLATFORM_TREASURY_PUBLIC_KEY: G_TEST_TREASURY
+          HORIZON_URL: https://horizon-testnet.stellar.org
+      - run: npm run build
+      - name: Require production migration URL
+        run: test -n "$DATABASE_DIRECT_URL"
+      - name: Run production migrations
+        run: npm run db:migrate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_DIRECT_URL }}
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: minimum-32-chars-high-entropy-secret
+          STELLAR_ASSET_ISSUER: G_MIGRATION_ONLY
+          PLATFORM_TREASURY_PUBLIC_KEY: G_MIGRATION_ONLY
+          HORIZON_URL: https://horizon.stellar.org
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+      - name: Trigger production deploy hook
+        run: |
+          if [ -z "$PRODUCTION_DEPLOY_HOOK_URL" ]; then
+            echo "PRODUCTION_DEPLOY_HOOK_URL not set; image pushed but runtime deploy was not triggered."
+            exit 1
+          fi
+          curl -fsS -X POST "$PRODUCTION_DEPLOY_HOOK_URL"
