@@ -34,3 +34,16 @@ The API exposes deployment smoke-test endpoints:
 - `GET /health` checks Postgres and Redis.
 - `GET /health/deep` adds RPC and queue context for authenticated monitoring.
 - `GET /health/rpc` checks Stellar Horizon and Soroban RPC reachability.
+
+Before launch, run:
+
+```sh
+scripts/generate-secrets.sh
+scripts/pre-launch-audit.sh
+```
+
+Operational runbooks live in `docs/LAUNCH_RUNBOOK.md` and `docs/RECOVERY.md`.
+
+## License
+
+MIT
