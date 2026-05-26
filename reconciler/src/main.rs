@@ -2,6 +2,7 @@ mod compliance;
 mod matcher;
 mod metrics;
 mod processor;
+mod soroban_indexer;
 mod stream;
 
 use anyhow::{Context, Result};
@@ -14,6 +15,8 @@ pub struct Config {
     pub database_url: String,
     pub redis_url: String,
     pub horizon_url: String,
+    pub soroban_rpc_url: Option<String>,
+    pub invoice_contract_id: Option<String>,
     pub treasury: String,
     pub asset_code: String,
     pub asset_issuer: String,
@@ -29,6 +32,8 @@ impl Config {
             database_url: get("DATABASE_URL")?,
             redis_url: get("REDIS_URL")?,
             horizon_url: get("HORIZON_URL")?,
+            soroban_rpc_url: std::env::var("SOROBAN_RPC_URL").ok(),
+            invoice_contract_id: std::env::var("INVOICE_CONTRACT_ID").ok(),
             treasury: get("PLATFORM_TREASURY_PUBLIC_KEY")?,
             asset_code: std::env::var("STELLAR_ASSET_CODE").unwrap_or_else(|_| "USDC".to_string()),
             asset_issuer: get("STELLAR_ASSET_ISSUER")?,
@@ -50,5 +55,21 @@ async fn main() -> Result<()> {
         .await?;
     let cursor = cursor.unwrap_or_else(|| std::env::var("RECONCILER_CURSOR").unwrap_or_else(|_| "now".to_string()));
     redis.set::<_, _, ()>("reconciler:status", "running").await?;
+
+    // Spawn Soroban event indexer if configured
+    if let (Some(rpc_url), Some(contract_id)) = (config.soroban_rpc_url.clone(), config.invoice_contract_id.clone()) {
+        let db_clone = db.clone();
+        tokio::spawn(async move {
+            let mut start_ledger: u64 = 0;
+            loop {
+                match soroban_indexer::index_contract_events(&db_clone, &rpc_url, &contract_id, start_ledger).await {
+                    Ok(latest) => { start_ledger = latest.saturating_sub(1); }
+                    Err(e) => tracing::error!("soroban indexer error: {e}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+            }
+        });
+    }
+
     stream::run_with_backoff(db, redis, config, cursor).await
 }

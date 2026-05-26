@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ApiKeysModule } from './api-keys/api-keys.module';
+import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { validate } from './config/validate';
@@ -12,6 +14,7 @@ import { MerchantsModule } from './merchants/merchants.module';
 import { PaymentsModule } from './payments/payments.module';
 import { RedisModule } from './redis/redis.module';
 import { SettlementModule } from './settlement/settlement.module';
+import { SorobanEventsModule } from './soroban-events/soroban-events.module';
 import { StellarModule } from './stellar/stellar.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 
@@ -38,6 +41,9 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     PaymentsModule,
     WebhooksModule,
     SettlementModule,
+    ApiKeysModule,
+    AuditModule,
+    SorobanEventsModule,
   ],
 })
 export class AppModule {}
