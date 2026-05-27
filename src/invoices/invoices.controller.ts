@@ -18,6 +18,8 @@ export class InvoicesController {
     @Body() body: unknown,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
+  create(@Req() req: any, @Body() body: unknown) {
+    const idempotencyKey = req.headers['idempotency-key'];
     return this.invoices.create(req.user.merchantId, body, idempotencyKey);
   }
 
