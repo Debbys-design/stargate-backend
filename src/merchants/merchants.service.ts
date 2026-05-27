@@ -8,6 +8,8 @@ const updateMerchantSchema = z.object({
   stellar_address: z.string().regex(/^G[A-Z0-9]{10,}$/).optional(),
   settlement_cadence: z.enum(['daily', 'weekly']).optional(),
   test_mode: z.boolean().optional(),
+  min_invoice_usdc: z.string().regex(/^\d+(\.\d{1,7})?$/).optional(),
+  max_invoice_usdc: z.string().regex(/^\d+(\.\d{1,7})?$/).optional(),
 });
 
 @Injectable()
@@ -55,6 +57,11 @@ export class MerchantsService {
        WHERE id=$1
        RETURNING *`,
       [id, dto.name ?? current.name, dto.stellar_address ?? current.stellar_address, dto.settlement_cadence ?? null, dto.test_mode ?? null],
+         SET name=$2, stellar_address=$3, settlement_cadence=COALESCE($4, settlement_cadence), 
+             min_invoice_usdc=COALESCE($5, min_invoice_usdc), max_invoice_usdc=COALESCE($6, max_invoice_usdc), updated_at=NOW()
+       WHERE id=$1
+       RETURNING *`,
+      [id, dto.name ?? current.name, dto.stellar_address ?? current.stellar_address, dto.settlement_cadence ?? null, dto.min_invoice_usdc ?? null, dto.max_invoice_usdc ?? null],
     );
     return result.rows[0];
   }

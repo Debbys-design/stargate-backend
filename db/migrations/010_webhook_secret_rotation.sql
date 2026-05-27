@@ -1,0 +1,2 @@
+ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS previous_secret TEXT;
+ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS secret_rotated_at TIMESTAMPTZ;
