@@ -6,7 +6,7 @@ import { DATABASE_POOL } from '../database/database.module';
 
 const createWebhookSchema = z.object({
   url: z.string().url().refine((url) => url.startsWith('https://'), 'Webhook URL must use https'),
-  events: z.array(z.enum(['invoice.paid', 'invoice.expired', 'invoice.cancelled', 'settlement.completed'])).min(1),
+  events: z.array(z.enum(['invoice.paid', 'invoice.expired', 'invoice.cancelled', 'settlement.completed', 'merchant.payment_intent.expired'])).min(1),
 });
 
 @Injectable()
@@ -51,6 +51,19 @@ export class WebhooksService {
       [merchantId, deliveryId],
     );
     return result.rows[0];
+  }
+
+  async dispatchEvent(merchantId: string, eventType: string, payload: Record<string, unknown>) {
+    const hooks = await this.pool.query(
+      `SELECT id FROM webhooks WHERE merchant_id=$1 AND active=true AND $2=ANY(events)`,
+      [merchantId, eventType],
+    );
+    for (const hook of hooks.rows) {
+      await this.pool.query(
+        `INSERT INTO webhook_deliveries (webhook_id, event_type, payload) VALUES ($1,$2,$3)`,
+        [hook.id, eventType, payload],
+      );
+    }
   }
 
   sign(secret: string, payload: unknown) {
