@@ -23,6 +23,12 @@ export class WebhooksController {
     return this.webhooks.list(req.user.merchantId);
   }
 
+  @Post(':id/rotate-secret')
+  @ApiOperation({ summary: 'Rotate webhook secret with overlap window' })
+  rotateSecret(@Req() req: any, @Param('id') id: string) {
+    return this.webhooks.rotateSecret(req.user.merchantId, id);
+  }
+
   @Delete(':id')
   @ApiOperation({ summary: 'Deactivate webhook' })
   remove(@Req() req: any, @Param('id') id: string) {

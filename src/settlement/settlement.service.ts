@@ -9,11 +9,11 @@ export class SettlementService {
 
   async createDailySettlements() {
     const merchants = await this.pool.query(
-      `SELECT merchant_id, SUM(net_usdc) AS amount
+      `SELECT merchant_id, SUM(net_usdc)::NUMERIC(18,7) AS amount
          FROM ledger_entries
         WHERE settlement_id IS NULL
         GROUP BY merchant_id
-       HAVING SUM(net_usdc) >= 1.00`,
+       HAVING SUM(net_usdc)::NUMERIC(18,7) >= 1.00`,
     );
     for (const merchant of merchants.rows) {
       // Check if pending settlement already exists for this merchant

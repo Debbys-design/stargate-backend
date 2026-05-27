@@ -13,7 +13,8 @@ export class InvoicesController {
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Create invoice' })
   create(@Req() req: any, @Body() body: unknown) {
-    return this.invoices.create(req.user.merchantId, body);
+    const idempotencyKey = req.headers['idempotency-key'];
+    return this.invoices.create(req.user.merchantId, body, idempotencyKey);
   }
 
   @Get()
