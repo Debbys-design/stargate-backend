@@ -25,9 +25,13 @@ export class PaymentsService {
       const heartbeat = setInterval(() => subscriber.next({ data: { type: 'heartbeat' } } as MessageEvent), 15_000);
       redis.subscribe(`invoice:${invoiceId}`).then(() => undefined);
       redis.on('message', (_channel, message) => {
-        const data = JSON.parse(message);
-        subscriber.next({ data } as MessageEvent);
-        if (data.status === 'paid' || data.status === 'expired') subscriber.complete();
+        try {
+          const data = JSON.parse(message);
+          subscriber.next({ data } as MessageEvent);
+          if (data.status === 'paid' || data.status === 'expired') subscriber.complete();
+        } catch {
+          // Ignore malformed messages, continue streaming
+        }
       });
       return () => {
         clearInterval(heartbeat);

@@ -16,9 +16,21 @@ export class SettlementService {
        HAVING SUM(net_usdc) >= 1.00`,
     );
     for (const merchant of merchants.rows) {
-      await this.pool.query(
-        `INSERT INTO settlements (merchant_id, amount_usdc, status) VALUES ($1,$2,'pending')`,
+      // Check if pending settlement already exists for this merchant
+      const existing = await this.pool.query(
+        `SELECT id FROM settlements WHERE merchant_id=$1 AND status='pending'`,
+        [merchant.merchant_id],
+      );
+      if (existing.rows.length > 0) continue;
+
+      // Create settlement and mark ledger entries
+      const settlement = await this.pool.query(
+        `INSERT INTO settlements (merchant_id, amount_usdc, status) VALUES ($1,$2,'pending') RETURNING id`,
         [merchant.merchant_id, merchant.amount],
+      );
+      await this.pool.query(
+        `UPDATE ledger_entries SET settlement_id=$1 WHERE merchant_id=$2 AND settlement_id IS NULL`,
+        [settlement.rows[0].id, merchant.merchant_id],
       );
     }
     return merchants.rowCount;

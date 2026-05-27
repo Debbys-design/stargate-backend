@@ -1,5 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { createHmac, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
@@ -47,6 +49,7 @@ export class WebhooksService {
         actorEmail,
       });
     }
+    if (result.rows.length === 0) throw new NotFoundException('Webhook not found');
     return result.rows[0];
   }
 
@@ -74,6 +77,11 @@ export class WebhooksService {
         metadata: { deliveryId },
       });
     }
+        WHERE d.webhook_id=w.id AND w.merchant_id=$1 AND d.id=$2 AND d.status IN ('failed','dead')
+        RETURNING d.*`,
+      [merchantId, deliveryId],
+    );
+    if (result.rows.length === 0) throw new NotFoundException('Delivery not found or cannot be retried');
     return result.rows[0];
   }
 
