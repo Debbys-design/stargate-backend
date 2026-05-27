@@ -11,6 +11,8 @@ const createWebhookSchema = z.object({
 
 @Injectable()
 export class WebhooksService {
+  private readonly ROTATION_OVERLAP_HOURS = 24;
+
   constructor(@Inject(DATABASE_POOL) private readonly pool: Pool) {}
 
   async create(merchantId: string, input: unknown) {
@@ -31,6 +33,19 @@ export class WebhooksService {
   async deactivate(merchantId: string, id: string) {
     const result = await this.pool.query('UPDATE webhooks SET active=false WHERE id=$1 AND merchant_id=$2 RETURNING id, active', [id, merchantId]);
     return result.rows[0];
+  }
+
+  async rotateSecret(merchantId: string, id: string) {
+    const newSecret = `whsec_${randomBytes(32).toString('hex')}`;
+    const result = await this.pool.query(
+      `UPDATE webhooks 
+        SET previous_secret=secret, secret=$3, secret_rotated_at=NOW()
+        WHERE id=$1 AND merchant_id=$2
+        RETURNING id, secret`,
+      [id, merchantId, newSecret],
+    );
+    if (!result.rows[0]) throw new Error('Webhook not found');
+    return { ...result.rows[0], secret: newSecret };
   }
 
   async deliveries(merchantId: string, webhookId: string) {
@@ -61,5 +76,27 @@ export class WebhooksService {
     const expected = Buffer.from(this.sign(secret, payload));
     const actual = Buffer.from(signature);
     return expected.length === actual.length && timingSafeEqual(expected, actual);
+  }
+
+  async verifyWithRotation(webhookId: string, payload: unknown, signature: string) {
+    const webhook = await this.pool.query('SELECT secret, previous_secret, secret_rotated_at FROM webhooks WHERE id=$1', [webhookId]);
+    if (!webhook.rows[0]) return false;
+
+    const { secret, previous_secret, secret_rotated_at } = webhook.rows[0];
+
+    // Try current secret
+    if (this.verify(secret, payload, signature)) return true;
+
+    // Try previous secret if within overlap window
+    if (previous_secret && secret_rotated_at) {
+      const rotatedTime = new Date(secret_rotated_at);
+      const now = new Date();
+      const hoursSinceRotation = (now.getTime() - rotatedTime.getTime()) / (1000 * 60 * 60);
+      if (hoursSinceRotation < this.ROTATION_OVERLAP_HOURS) {
+        return this.verify(previous_secret, payload, signature);
+      }
+    }
+
+    return false;
   }
 }
