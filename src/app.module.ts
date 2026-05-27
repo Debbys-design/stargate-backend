@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { ScheduleModule } from '@nestjs/schedule';
 import { AuthModule } from './auth/auth.module';
+import { AuditModule } from './audit/audit.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { validate } from './config/validate';
 import { DatabaseModule } from './database/database.module';
@@ -31,6 +32,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     RedisModule,
     HealthModule,
     AuthModule,
+    AuditModule,
     MerchantsModule,
     StellarModule,
     ComplianceModule,

@@ -3,6 +3,7 @@ import { createHmac, randomBytes, timingSafeEqual, createHash } from 'node:crypt
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
+import { AuditService } from '../audit/audit.service';
 
 const createWebhookSchema = z.object({
   url: z.string().url().refine((url) => url.startsWith('https://'), 'Webhook URL must use https'),
@@ -11,9 +12,12 @@ const createWebhookSchema = z.object({
 
 @Injectable()
 export class WebhooksService {
-  constructor(@Inject(DATABASE_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(DATABASE_POOL) private readonly pool: Pool,
+    private readonly audit: AuditService,
+  ) {}
 
-  async create(merchantId: string, input: unknown) {
+  async create(merchantId: string, input: unknown, actorIp?: string, actorEmail?: string) {
     const dto = createWebhookSchema.parse(input);
     const secret = `whsec_${randomBytes(32).toString('hex')}`;
     const hashedSecret = createHash('sha256').update(secret).digest('hex');
@@ -21,7 +25,13 @@ export class WebhooksService {
       `INSERT INTO webhooks (merchant_id, url, events, hashed_secret) VALUES ($1,$2,$3,$4) RETURNING id, url, events, active, created_at`,
       [merchantId, dto.url, dto.events, hashedSecret],
     );
-    return { ...result.rows[0], secret };
+    const webhook = result.rows[0];
+    await this.audit.log(merchantId, 'webhook_created', 'webhook', webhook.id, {
+      actorIp,
+      actorEmail,
+      metadata: { url: webhook.url, events: webhook.events },
+    });
+    return { ...webhook, secret };
   }
 
   async list(merchantId: string) {
@@ -29,8 +39,14 @@ export class WebhooksService {
     return result.rows;
   }
 
-  async deactivate(merchantId: string, id: string) {
+  async deactivate(merchantId: string, id: string, actorIp?: string, actorEmail?: string) {
     const result = await this.pool.query('UPDATE webhooks SET active=false WHERE id=$1 AND merchant_id=$2 RETURNING id, active', [id, merchantId]);
+    if (result.rows[0]) {
+      await this.audit.log(merchantId, 'webhook_deactivated', 'webhook', id, {
+        actorIp,
+        actorEmail,
+      });
+    }
     return result.rows[0];
   }
 
@@ -42,15 +58,22 @@ export class WebhooksService {
     return result.rows;
   }
 
-  async retry(merchantId: string, deliveryId: string) {
+  async retry(merchantId: string, deliveryId: string, actorIp?: string, actorEmail?: string) {
     const result = await this.pool.query(
       `UPDATE webhook_deliveries d
           SET status='pending', next_retry_at=NOW()
          FROM webhooks w
         WHERE d.webhook_id=w.id AND w.merchant_id=$1 AND d.id=$2
-        RETURNING d.*`,
+        RETURNING d.*, w.id as webhook_id`,
       [merchantId, deliveryId],
     );
+    if (result.rows[0]) {
+      await this.audit.log(merchantId, 'webhook_retried', 'webhook', result.rows[0].webhook_id, {
+        actorIp,
+        actorEmail,
+        metadata: { deliveryId },
+      });
+    }
     return result.rows[0];
   }
 
