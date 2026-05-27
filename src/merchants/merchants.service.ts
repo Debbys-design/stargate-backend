@@ -34,6 +34,24 @@ export class MerchantsService {
     return result.rows[0];
   }
 
+  async onboarding(id: string) {
+    const merchant = await this.findOne(id);
+    const [invoiceRow, webhookRow, scheduleRow] = await Promise.all([
+      this.pool.query('SELECT 1 FROM invoices WHERE merchant_id=$1 LIMIT 1', [id]),
+      this.pool.query('SELECT 1 FROM webhooks WHERE merchant_id=$1 AND active=true LIMIT 1', [id]),
+      this.pool.query('SELECT 1 FROM recurring_schedules WHERE merchant_id=$1 LIMIT 1', [id]),
+    ]);
+    const steps = [
+      { key: 'profile_complete', label: 'Complete merchant profile', done: !!(merchant.name && merchant.stellar_address) },
+      { key: 'kyb_verified', label: 'KYB verification', done: !!merchant.kyb_verified_at },
+      { key: 'first_invoice', label: 'Create first invoice', done: invoiceRow.rowCount! > 0 },
+      { key: 'webhook_configured', label: 'Configure a webhook', done: webhookRow.rowCount! > 0 },
+      { key: 'schedule_created', label: 'Set up a recurring schedule', done: scheduleRow.rowCount! > 0 },
+    ];
+    const completed = steps.filter((s) => s.done).length;
+    return { completed, total: steps.length, percent: Math.round((completed / steps.length) * 100), steps };
+  }
+
   async update(id: string, input: unknown) {
     const dto = updateMerchantSchema.parse(input);
     const current = await this.findOne(id);
