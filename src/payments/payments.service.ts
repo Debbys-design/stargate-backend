@@ -30,6 +30,15 @@ export class PaymentsService {
           if (data.status === 'paid' || data.status === 'expired') subscriber.complete();
         },
         error: (err) => subscriber.error(err),
+      redis.subscribe(`invoice:${invoiceId}`).then(() => undefined);
+      redis.on('message', (_channel, message) => {
+        try {
+          const data = JSON.parse(message);
+          subscriber.next({ data } as MessageEvent);
+          if (data.status === 'paid' || data.status === 'expired') subscriber.complete();
+        } catch {
+          // Ignore malformed messages, continue streaming
+        }
       });
 
       return () => {

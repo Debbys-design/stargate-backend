@@ -5,6 +5,10 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::str::FromStr;
 
+#[cfg(test)]
+#[path = "processor_tests.rs"]
+mod tests;
+
 pub async fn process_payment(
     db: &PgPool,
     redis: &mut MultiplexedConnection,
