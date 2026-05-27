@@ -1,13 +1,25 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import { Pool } from 'pg';
+import { z } from 'zod';
+import { DATABASE_POOL } from '../database/database.module';
 import { REDIS } from '../redis/redis.module';
 
 export type ScreeningResult = { result: 'clear' | 'blocked' | 'review'; risk_score: number };
 
+const uploadDocumentSchema = z.object({
+  document_type: z.enum(['passport', 'drivers_license', 'national_id', 'utility_bill', 'bank_statement']),
+  file_name: z.string().min(1).max(255),
+});
+
 @Injectable()
 export class ComplianceService {
-  constructor(@Inject(REDIS) private readonly redis: Redis, private readonly config: ConfigService) {}
+  constructor(
+    @Inject(REDIS) private readonly redis: Redis,
+    private readonly config: ConfigService,
+    @Inject(DATABASE_POOL) private readonly pool: Pool,
+  ) {}
 
   async screenAddress(address: string): Promise<ScreeningResult> {
     const key = `ofac:${address}`;
@@ -55,5 +67,21 @@ export class ComplianceService {
   private async cache(key: string, result: ScreeningResult) {
     await this.redis.set(key, JSON.stringify(result), 'EX', 3600);
     return result;
+  }
+
+  async uploadDocument(merchantId: string, input: unknown) {
+    const dto = uploadDocumentSchema.parse(input);
+    const s3Key = `kyc/${merchantId}/${Date.now()}-${dto.file_name}`;
+    const result = await this.pool.query(
+      `INSERT INTO kyc_documents (merchant_id, document_type, file_name, s3_key)
+       VALUES ($1,$2,$3,$4) RETURNING id, document_type, file_name, status, uploaded_at`,
+      [merchantId, dto.document_type, dto.file_name, s3Key],
+    );
+    const bucket = this.config.get<string>('KYC_S3_BUCKET', 'stargate-kyc-documents');
+    const region = this.config.get<string>('AWS_REGION', 'us-east-1');
+    return {
+      ...result.rows[0],
+      upload_url: `https://${bucket}.s3.${region}.amazonaws.com/${s3Key}`,
+    };
   }
 }

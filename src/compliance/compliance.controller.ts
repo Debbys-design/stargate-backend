@@ -1,5 +1,6 @@
-import { Body, Controller, Post } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Post, Req, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { ComplianceService } from './compliance.service';
 
 @ApiTags('compliance')
@@ -12,5 +13,13 @@ export class ComplianceController {
   async screen(@Body() body: { address: string }) {
     const screening = await this.compliance.screenAddress(body.address);
     return { result: screening.result };
+  }
+
+  @Post('documents')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Upload KYC document' })
+  uploadDocument(@Req() req: any, @Body() body: unknown) {
+    return this.compliance.uploadDocument(req.user.merchantId, body);
   }
 }
