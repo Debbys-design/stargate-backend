@@ -43,6 +43,7 @@ export class InvoicesService {
     const dto = createInvoiceSchema.parse(input);
     const merchant = await this.merchants.findOne(merchantId);
     const amount = toUnits(dto.amount_usdc);
+    await this.enforceSpendLimits(merchantId, merchant, amount);
     const fee = this.calculateFee(amount, merchant);
     const gross = amount + fee;
     const net = amount - this.fixedFeeUnits(merchant);
@@ -124,6 +125,27 @@ export class InvoicesService {
   @Cron('0 */5 * * * *')
   async expireInvoices() {
     await this.pool.query(`UPDATE invoices SET status='expired' WHERE status='pending' AND expires_at < NOW()`);
+  }
+
+  private async enforceSpendLimits(merchantId: string, merchant: any, amount: bigint) {
+    if (merchant.daily_spend_limit_usdc) {
+      const { rows } = await this.pool.query(
+        `SELECT COALESCE(SUM(amount_usdc::numeric),0) AS total FROM invoices
+          WHERE merchant_id=$1 AND created_at >= date_trunc('day', NOW()) AND status != 'cancelled'`,
+        [merchantId],
+      );
+      if (toUnits(String(rows[0].total)) + amount > toUnits(String(merchant.daily_spend_limit_usdc)))
+        throw new BadRequestException('Daily spend limit exceeded');
+    }
+    if (merchant.monthly_spend_limit_usdc) {
+      const { rows } = await this.pool.query(
+        `SELECT COALESCE(SUM(amount_usdc::numeric),0) AS total FROM invoices
+          WHERE merchant_id=$1 AND created_at >= date_trunc('month', NOW()) AND status != 'cancelled'`,
+        [merchantId],
+      );
+      if (toUnits(String(rows[0].total)) + amount > toUnits(String(merchant.monthly_spend_limit_usdc)))
+        throw new BadRequestException('Monthly spend limit exceeded');
+    }
   }
 
   private calculateFee(amount: bigint, merchant: any) {
