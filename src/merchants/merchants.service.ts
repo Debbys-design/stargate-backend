@@ -7,6 +7,9 @@ const updateMerchantSchema = z.object({
   name: z.string().min(1).optional(),
   stellar_address: z.string().regex(/^G[A-Z0-9]{10,}$/).optional(),
   settlement_cadence: z.enum(['daily', 'weekly']).optional(),
+  test_mode: z.boolean().optional(),
+  min_invoice_usdc: z.string().regex(/^\d+(\.\d{1,7})?$/).optional(),
+  max_invoice_usdc: z.string().regex(/^\d+(\.\d{1,7})?$/).optional(),
 });
 
 @Injectable()
@@ -34,15 +37,31 @@ export class MerchantsService {
     return result.rows[0];
   }
 
+  async updateKycStatus(id: string, status: 'approved' | 'rejected') {
+    const result = await this.pool.query(
+      `UPDATE merchants SET kyc_status=$2, kyb_verified_at=CASE WHEN $2='approved' THEN NOW() ELSE NULL END, updated_at=NOW()
+       WHERE id=$1 RETURNING *`,
+      [id, status],
+    );
+    if (!result.rows[0]) throw new NotFoundException('Merchant not found');
+    return result.rows[0];
+  }
+
   async update(id: string, input: unknown) {
     const dto = updateMerchantSchema.parse(input);
     const current = await this.findOne(id);
     const result = await this.pool.query(
       `UPDATE merchants
-         SET name=$2, stellar_address=$3, settlement_cadence=COALESCE($4, settlement_cadence), updated_at=NOW()
+         SET name=$2, stellar_address=$3, settlement_cadence=COALESCE($4, settlement_cadence),
+             test_mode=COALESCE($5, test_mode), updated_at=NOW()
        WHERE id=$1
        RETURNING *`,
-      [id, dto.name ?? current.name, dto.stellar_address ?? current.stellar_address, dto.settlement_cadence ?? null],
+      [id, dto.name ?? current.name, dto.stellar_address ?? current.stellar_address, dto.settlement_cadence ?? null, dto.test_mode ?? null],
+         SET name=$2, stellar_address=$3, settlement_cadence=COALESCE($4, settlement_cadence), 
+             min_invoice_usdc=COALESCE($5, min_invoice_usdc), max_invoice_usdc=COALESCE($6, max_invoice_usdc), updated_at=NOW()
+       WHERE id=$1
+       RETURNING *`,
+      [id, dto.name ?? current.name, dto.stellar_address ?? current.stellar_address, dto.settlement_cadence ?? null, dto.min_invoice_usdc ?? null, dto.max_invoice_usdc ?? null],
     );
     return result.rows[0];
   }

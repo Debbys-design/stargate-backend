@@ -61,6 +61,21 @@ export class InvoicesService {
 
     const merchant = await this.merchants.findOne(merchantId);
     const amount = toUnits(dto.amount_usdc);
+    
+    // Validate against merchant invoice limits
+    if (merchant.min_invoice_usdc) {
+      const minAmount = toUnits(merchant.min_invoice_usdc);
+      if (amount < minAmount) {
+        throw new BadRequestException(`Invoice amount must be at least ${merchant.min_invoice_usdc} USDC`);
+      }
+    }
+    if (merchant.max_invoice_usdc) {
+      const maxAmount = toUnits(merchant.max_invoice_usdc);
+      if (amount > maxAmount) {
+        throw new BadRequestException(`Invoice amount cannot exceed ${merchant.max_invoice_usdc} USDC`);
+      }
+    }
+    
     const fee = this.calculateFee(amount, merchant);
     const gross = amount + fee;
     const net = amount - this.fixedFeeUnits(merchant);
@@ -139,7 +154,8 @@ export class InvoicesService {
 
   async getPublic(id: string) {
     const result = await this.pool.query(
-      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at, m.name AS merchant_name
+      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at,
+              m.name AS merchant_name, m.test_mode
          FROM invoices i
          JOIN merchants m ON m.id=i.merchant_id
         WHERE i.id=$1`,
