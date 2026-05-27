@@ -37,6 +37,22 @@ export class MerchantsService {
     return result.rows[0];
   }
 
+  async onboarding(id: string) {
+    const merchant = await this.findOne(id);
+    const [invoiceRow, webhookRow, scheduleRow] = await Promise.all([
+      this.pool.query('SELECT 1 FROM invoices WHERE merchant_id=$1 LIMIT 1', [id]),
+      this.pool.query('SELECT 1 FROM webhooks WHERE merchant_id=$1 AND active=true LIMIT 1', [id]),
+      this.pool.query('SELECT 1 FROM recurring_schedules WHERE merchant_id=$1 LIMIT 1', [id]),
+    ]);
+    const steps = [
+      { key: 'profile_complete', label: 'Complete merchant profile', done: !!(merchant.name && merchant.stellar_address) },
+      { key: 'kyb_verified', label: 'KYB verification', done: !!merchant.kyb_verified_at },
+      { key: 'first_invoice', label: 'Create first invoice', done: invoiceRow.rowCount! > 0 },
+      { key: 'webhook_configured', label: 'Configure a webhook', done: webhookRow.rowCount! > 0 },
+      { key: 'schedule_created', label: 'Set up a recurring schedule', done: scheduleRow.rowCount! > 0 },
+    ];
+    const completed = steps.filter((s) => s.done).length;
+    return { completed, total: steps.length, percent: Math.round((completed / steps.length) * 100), steps };
   async updateKycStatus(id: string, status: 'approved' | 'rejected') {
     const result = await this.pool.query(
       `UPDATE merchants SET kyc_status=$2, kyb_verified_at=CASE WHEN $2='approved' THEN NOW() ELSE NULL END, updated_at=NOW()
