@@ -39,8 +39,18 @@ export class InvoicesService {
     private readonly config: ConfigService,
   ) {}
 
-  async create(merchantId: string, input: unknown) {
+  async create(merchantId: string, input: unknown, idempotencyKey?: string) {
     const dto = createInvoiceSchema.parse(input);
+    
+    // Check for existing invoice with same idempotency key
+    if (idempotencyKey) {
+      const existing = await this.pool.query(
+        'SELECT *, $3::text || \'/pay/\' || id AS payment_url FROM invoices WHERE merchant_id=$1 AND idempotency_key=$2',
+        [merchantId, idempotencyKey, this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance')],
+      );
+      if (existing.rows[0]) return existing.rows[0];
+    }
+
     const merchant = await this.merchants.findOne(merchantId);
     const amount = toUnits(dto.amount_usdc);
     const fee = this.calculateFee(amount, merchant);
@@ -54,9 +64,9 @@ export class InvoicesService {
 
     const result = await this.pool.query(
       `INSERT INTO invoices
-         (merchant_id, amount_usdc, gross_usdc, fee_usdc, net_usdc, description, muxed_id, muxed_address, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       RETURNING *, $10::text || '/pay/' || id AS payment_url`,
+         (merchant_id, amount_usdc, gross_usdc, fee_usdc, net_usdc, description, muxed_id, muxed_address, expires_at, idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING *, $11::text || '/pay/' || id AS payment_url`,
       [
         merchantId,
         fromUnits(amount),
@@ -67,6 +77,7 @@ export class InvoicesService {
         muxedId.toString(),
         muxedAddress,
         expiresAt,
+        idempotencyKey ?? null,
         this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance'),
       ],
     );
