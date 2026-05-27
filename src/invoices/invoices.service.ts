@@ -1,6 +1,7 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
+import PDFDocument from 'pdfkit';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
@@ -108,6 +109,26 @@ export class InvoicesService {
     );
     if (!result.rows[0]) throw new NotFoundException('Invoice not found');
     return result.rows[0];
+  }
+
+  async generatePdf(merchantId: string, id: string) {
+    const { payment_events: _events, ...invoice } = await this.get(merchantId, id);
+    const merchant = await this.merchants.findOne(merchantId);
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    doc.fontSize(20).text('Invoice Receipt', { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(12);
+    doc.text(`Merchant: ${merchant.name}`);
+    doc.text(`Invoice ID: ${invoice.id}`);
+    doc.text(`Status: ${invoice.status}`);
+    doc.text(`Amount (USDC): ${invoice.amount_usdc}`);
+    doc.text(`Fee (USDC): ${invoice.fee_usdc}`);
+    doc.text(`Net (USDC): ${invoice.net_usdc}`);
+    if (invoice.description) doc.text(`Description: ${invoice.description}`);
+    doc.text(`Created: ${new Date(invoice.created_at).toISOString()}`);
+    if (invoice.paid_at) doc.text(`Paid: ${new Date(invoice.paid_at).toISOString()}`);
+    doc.end();
+    return doc;
   }
 
   async cancel(merchantId: string, id: string) {

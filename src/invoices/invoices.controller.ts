@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Header, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { InvoicesService } from './invoices.service';
 
@@ -36,6 +37,17 @@ export class InvoicesController {
   @ApiOperation({ summary: 'Invoice detail' })
   get(@Req() req: any, @Param('id') id: string) {
     return this.invoices.get(req.user.merchantId, id);
+  }
+
+  @Get(':id/pdf')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Header('Content-Type', 'application/pdf')
+  @ApiOperation({ summary: 'Download invoice PDF receipt' })
+  async pdf(@Req() req: any, @Param('id') id: string, @Res() res: Response) {
+    const stream = await this.invoices.generatePdf(req.user.merchantId, id);
+    res.setHeader('Content-Disposition', `attachment; filename="invoice-${id}.pdf"`);
+    stream.pipe(res);
   }
 
   @Post(':id/cancel')
