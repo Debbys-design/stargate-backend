@@ -11,6 +11,7 @@ import { InvoicesModule } from './invoices/invoices.module';
 import { MerchantsModule } from './merchants/merchants.module';
 import { PaymentsModule } from './payments/payments.module';
 import { RedisModule } from './redis/redis.module';
+import { SchedulesModule } from './schedules/schedules.module';
 import { SettlementModule } from './settlement/settlement.module';
 import { StellarModule } from './stellar/stellar.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
@@ -38,6 +39,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     PaymentsModule,
     WebhooksModule,
     SettlementModule,
+    SchedulesModule,
   ],
 })
 export class AppModule {}
