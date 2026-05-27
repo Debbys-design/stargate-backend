@@ -34,6 +34,16 @@ export class MerchantsService {
     return result.rows[0];
   }
 
+  async updateKycStatus(id: string, status: 'approved' | 'rejected') {
+    const result = await this.pool.query(
+      `UPDATE merchants SET kyc_status=$2, kyb_verified_at=CASE WHEN $2='approved' THEN NOW() ELSE NULL END, updated_at=NOW()
+       WHERE id=$1 RETURNING *`,
+      [id, status],
+    );
+    if (!result.rows[0]) throw new NotFoundException('Merchant not found');
+    return result.rows[0];
+  }
+
   async update(id: string, input: unknown) {
     const dto = updateMerchantSchema.parse(input);
     const current = await this.findOne(id);

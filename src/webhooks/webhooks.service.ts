@@ -6,7 +6,7 @@ import { DATABASE_POOL } from '../database/database.module';
 
 const createWebhookSchema = z.object({
   url: z.string().url().refine((url) => url.startsWith('https://'), 'Webhook URL must use https'),
-  events: z.array(z.enum(['invoice.paid', 'invoice.expired', 'invoice.cancelled', 'settlement.completed'])).min(1),
+  events: z.array(z.enum(['invoice.paid', 'invoice.expired', 'invoice.cancelled', 'settlement.completed', 'merchant.kyc.approved', 'merchant.kyc.rejected'])).min(1),
 });
 
 @Injectable()
@@ -51,6 +51,16 @@ export class WebhooksService {
       [merchantId, deliveryId],
     );
     return result.rows[0];
+  }
+
+  async emitKycEvent(merchantId: string, status: 'approved' | 'rejected') {
+    const eventType = `merchant.kyc.${status}` as const;
+    await this.pool.query(
+      `INSERT INTO webhook_deliveries (webhook_id, event_type, payload)
+       SELECT id, $2, jsonb_build_object('merchant_id', $1::uuid, 'kyc_status', $3)
+         FROM webhooks WHERE merchant_id=$1 AND active=true AND $2=ANY(events)`,
+      [merchantId, eventType, status],
+    );
   }
 
   sign(secret: string, payload: unknown) {

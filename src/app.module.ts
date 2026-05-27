@@ -1,3 +1,4 @@
+import { AdminModule } from './admin/admin.module';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
@@ -38,6 +39,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     PaymentsModule,
     WebhooksModule,
     SettlementModule,
+    AdminModule,
   ],
 })
 export class AppModule {}
