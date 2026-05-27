@@ -5,19 +5,32 @@ import PDFDocument from 'pdfkit';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
+import { FxRateService, SupportedCurrency } from '../fx/fx-rate.service';
 import { IdempotencyService } from '../idempotency/idempotency.service';
 import { MerchantsService } from '../merchants/merchants.service';
 import { StellarService } from '../stellar/stellar.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
 
+const SUPPORTED_CURRENCIES = ['USDC', 'EURC', 'XLM'] as const;
+
 const createInvoiceSchema = z.object({
+  amount: z
+    .union([z.number().positive().max(100_000), z.string().regex(/^\d+(\.\d{1,7})?$/)])
+    .transform((v) => String(v))
+    .optional(),
+  // Legacy field — kept for backward compat
   amount_usdc: z
     .union([z.number().positive().max(100_000), z.string().regex(/^\d+(\.\d{1,7})?$/)])
-    .transform((value) => String(value)),
+    .transform((v) => String(v))
+    .optional(),
+  currency: z.enum(SUPPORTED_CURRENCIES).default('USDC'),
   description: z.string().max(500).optional(),
   expires_in_minutes: z.number().int().min(5).max(10080).default(60),
   partial_payments_enabled: z.boolean().default(false),
-});
+}).transform((d) => ({
+  ...d,
+  amount: d.amount ?? d.amount_usdc,
+})).refine((d) => !!d.amount, { message: 'amount is required' });
 
 const SCALE = 10_000_000n;
 
@@ -43,6 +56,7 @@ export class InvoicesService {
     private readonly config: ConfigService,
     private readonly webhooks: WebhooksService,
     private readonly idempotency: IdempotencyService,
+    private readonly fx: FxRateService,
   ) {}
 
   async create(merchantId: string, input: unknown, idempotencyKey?: string) {
@@ -51,54 +65,66 @@ export class InvoicesService {
     if (idempotencyKey) {
       const cached = await this.idempotency.check(merchantId, idempotencyKey, bodyHash);
       if (cached) return cached;
-    }
-    const dto = createInvoiceSchema.parse(input);
-    
-    // Check for existing invoice with same idempotency key
-    if (idempotencyKey) {
+
       const existing = await this.pool.query(
-        'SELECT *, $3::text || \'/pay/\' || id AS payment_url FROM invoices WHERE merchant_id=$1 AND idempotency_key=$2',
+        `SELECT *, $3::text || '/pay/' || id AS payment_url FROM invoices WHERE merchant_id=$1 AND idempotency_key=$2`,
         [merchantId, idempotencyKey, this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance')],
       );
       if (existing.rows[0]) return existing.rows[0];
     }
 
+    const dto = createInvoiceSchema.parse(input);
+    const currency = dto.currency as SupportedCurrency;
     const merchant = await this.merchants.findOne(merchantId);
-    const amount = toUnits(dto.amount_usdc);
-    await this.enforceSpendLimits(merchantId, merchant, amount);
-    
-    // Validate against merchant invoice limits
+
+    // Validate merchant accepts this currency
+    if (merchant.accepted_assets && !merchant.accepted_assets.includes(currency)) {
+      throw new BadRequestException(`Merchant does not accept ${currency}`);
+    }
+
+    // Convert amount to USDC for fee/limit calculations
+    const usdcEquivStr = await this.fx.toUsdc(dto.amount!, currency);
+    const usdcEquiv = toUnits(usdcEquivStr);
+
+    await this.enforceSpendLimits(merchantId, merchant, usdcEquiv);
+
     if (merchant.min_invoice_usdc) {
-      const minAmount = toUnits(merchant.min_invoice_usdc);
-      if (amount < minAmount) {
-        throw new BadRequestException(`Invoice amount must be at least ${merchant.min_invoice_usdc} USDC`);
-      }
+      if (usdcEquiv < toUnits(merchant.min_invoice_usdc))
+        throw new BadRequestException(`Invoice amount must be at least ${merchant.min_invoice_usdc} USDC equivalent`);
     }
     if (merchant.max_invoice_usdc) {
-      const maxAmount = toUnits(merchant.max_invoice_usdc);
-      if (amount > maxAmount) {
-        throw new BadRequestException(`Invoice amount cannot exceed ${merchant.max_invoice_usdc} USDC`);
-      }
+      if (usdcEquiv > toUnits(merchant.max_invoice_usdc))
+        throw new BadRequestException(`Invoice amount cannot exceed ${merchant.max_invoice_usdc} USDC equivalent`);
     }
-    
-    const fee = this.calculateFee(amount, merchant);
-    const gross = amount + fee;
+
+    const amount = toUnits(dto.amount!);
+    const fee = this.calculateFee(usdcEquiv, merchant);
+    // Fee is always in USDC; gross in native currency = amount + fee converted back
+    const feeInCurrency = currency === 'USDC'
+      ? fee
+      : toUnits(await this.fx.toUsdc(fromUnits(fee), 'USDC').then(async (usdcFee) => {
+          const rate = await this.fx.getRate(currency);
+          return (parseFloat(usdcFee) / rate).toFixed(7);
+        }));
+    const gross = amount + feeInCurrency;
     const net = amount - this.fixedFeeUnits(merchant);
+
     const muxedBaseId = await this.ensureMuxedBase(merchantId);
     const next = await this.nextInvoiceSequence(merchantId);
     const muxedId = muxedBaseId + next;
     const muxedAddress = this.stellar.buildMuxedAddress(muxedId);
     const expiresAt = new Date(Date.now() + dto.expires_in_minutes * 60_000);
 
+    // gross_usdc_equiv stores the USDC value for reconciliation
+    const grossUsdcEquiv = currency === 'USDC' ? fromUnits(gross) : usdcEquivStr;
+
     const result = await this.pool.query(
       `INSERT INTO invoices
          (merchant_id, amount_usdc, gross_usdc, fee_usdc, net_usdc, description,
-          muxed_id, muxed_address, expires_at, amount_remaining_usdc, partial_payments_enabled)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       RETURNING *, $12::text || '/pay/' || id AS payment_url`,
-         (merchant_id, amount_usdc, gross_usdc, fee_usdc, net_usdc, description, muxed_id, muxed_address, expires_at, idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       RETURNING *, $11::text || '/pay/' || id AS payment_url`,
+          muxed_id, muxed_address, expires_at, amount_remaining_usdc, partial_payments_enabled,
+          idempotency_key, currency, gross_usdc_equiv)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       RETURNING *, $15::text || '/pay/' || id AS payment_url`,
       [
         merchantId,
         fromUnits(amount),
@@ -112,6 +138,8 @@ export class InvoicesService {
         fromUnits(gross),
         dto.partial_payments_enabled,
         idempotencyKey ?? null,
+        currency,
+        grossUsdcEquiv,
         this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance'),
       ],
     );
@@ -147,20 +175,20 @@ export class InvoicesService {
   async list(merchantId: string, query: any) {
     const limit = Math.min(Math.max(Number(query.limit ?? 20), 1), 100);
     const status = query.status;
-    const cursor = query.cursor; // Format: "created_at:id"
-    
+    const cursor = query.cursor;
+
     let params: any[] = [merchantId, limit + 1];
     let cursorSql = '';
-    
+
     if (cursor) {
       const [createdAt, id] = cursor.split(':');
       cursorSql = 'AND (created_at, id) < ($3::timestamptz, $4::uuid)';
       params.push(createdAt, id);
     }
-    
+
     const statusSql = status ? `AND status=$${params.length + 1}` : '';
     if (status) params.push(status);
-    
+
     const result = await this.pool.query(
       `SELECT * FROM invoices
         WHERE merchant_id=$1 ${cursorSql} ${statusSql}
@@ -168,11 +196,13 @@ export class InvoicesService {
         LIMIT $2`,
       params,
     );
-    
+
     const hasMore = result.rows.length > limit;
     const items = hasMore ? result.rows.slice(0, limit) : result.rows;
-    const nextCursor = hasMore ? `${items[items.length - 1].created_at.toISOString()}:${items[items.length - 1].id}` : null;
-    
+    const nextCursor = hasMore
+      ? `${items[items.length - 1].created_at.toISOString()}:${items[items.length - 1].id}`
+      : null;
+
     return { limit, items, nextCursor };
   }
 
@@ -185,7 +215,8 @@ export class InvoicesService {
 
   async getPublic(id: string) {
     const result = await this.pool.query(
-      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at,
+      `SELECT i.id, i.gross_usdc, i.gross_usdc_equiv, i.currency, i.description,
+              i.status, i.muxed_address, i.expires_at,
               m.name AS merchant_name, m.test_mode
          FROM invoices i
          JOIN merchants m ON m.id=i.merchant_id
@@ -225,7 +256,8 @@ export class InvoicesService {
     doc.text(`Merchant: ${merchant.name}`);
     doc.text(`Invoice ID: ${invoice.id}`);
     doc.text(`Status: ${invoice.status}`);
-    doc.text(`Amount (USDC): ${invoice.amount_usdc}`);
+    doc.text(`Currency: ${invoice.currency ?? 'USDC'}`);
+    doc.text(`Amount: ${invoice.amount_usdc} ${invoice.currency ?? 'USDC'}`);
     doc.text(`Fee (USDC): ${invoice.fee_usdc}`);
     doc.text(`Net (USDC): ${invoice.net_usdc}`);
     if (invoice.description) doc.text(`Description: ${invoice.description}`);
@@ -284,37 +316,42 @@ export class InvoicesService {
   @Cron('0 */5 * * * *')
   async expireInvoices() {
     const result = await this.pool.query(
-      `UPDATE invoices SET status='expired' WHERE status='pending' AND expires_at < NOW() RETURNING id, merchant_id`,
+      `UPDATE invoices SET status='expired'
+        WHERE status IN ('pending','partial') AND expires_at < NOW()
+        RETURNING id, merchant_id`,
     );
     for (const row of result.rows) {
-      await this.webhooks.dispatchEvent(row.merchant_id, 'merchant.payment_intent.expired', { invoice_id: row.id, expired_at: new Date().toISOString() });
-    await this.pool.query(`UPDATE invoices SET status='expired' WHERE status IN ('pending','partial') AND expires_at < NOW()`);
+      await this.webhooks.dispatchEvent(row.merchant_id, 'merchant.payment_intent.expired', {
+        invoice_id: row.id,
+        expired_at: new Date().toISOString(),
+      });
+    }
   }
 
-  private async enforceSpendLimits(merchantId: string, merchant: any, amount: bigint) {
+  private async enforceSpendLimits(merchantId: string, merchant: any, usdcAmount: bigint) {
     if (merchant.daily_spend_limit_usdc) {
       const { rows } = await this.pool.query(
-        `SELECT COALESCE(SUM(amount_usdc::numeric),0) AS total FROM invoices
+        `SELECT COALESCE(SUM(gross_usdc_equiv::numeric),0) AS total FROM invoices
           WHERE merchant_id=$1 AND created_at >= date_trunc('day', NOW()) AND status != 'cancelled'`,
         [merchantId],
       );
-      if (toUnits(String(rows[0].total)) + amount > toUnits(String(merchant.daily_spend_limit_usdc)))
+      if (toUnits(String(rows[0].total)) + usdcAmount > toUnits(String(merchant.daily_spend_limit_usdc)))
         throw new BadRequestException('Daily spend limit exceeded');
     }
     if (merchant.monthly_spend_limit_usdc) {
       const { rows } = await this.pool.query(
-        `SELECT COALESCE(SUM(amount_usdc::numeric),0) AS total FROM invoices
+        `SELECT COALESCE(SUM(gross_usdc_equiv::numeric),0) AS total FROM invoices
           WHERE merchant_id=$1 AND created_at >= date_trunc('month', NOW()) AND status != 'cancelled'`,
         [merchantId],
       );
-      if (toUnits(String(rows[0].total)) + amount > toUnits(String(merchant.monthly_spend_limit_usdc)))
+      if (toUnits(String(rows[0].total)) + usdcAmount > toUnits(String(merchant.monthly_spend_limit_usdc)))
         throw new BadRequestException('Monthly spend limit exceeded');
     }
   }
 
-  private calculateFee(amount: bigint, merchant: any) {
+  private calculateFee(usdcAmount: bigint, merchant: any) {
     const bps = merchant.tier === 'pro' ? 30n : merchant.tier === 'enterprise' ? BigInt(merchant.fee_bps) : 50n;
-    return (amount * bps) / 10_000n + this.fixedFeeUnits(merchant);
+    return (usdcAmount * bps) / 10_000n + this.fixedFeeUnits(merchant);
   }
 
   private fixedFeeUnits(merchant: any) {
@@ -326,7 +363,10 @@ export class InvoicesService {
   private async ensureMuxedBase(merchantId: string) {
     const current = await this.pool.query('SELECT muxed_base_id FROM merchants WHERE id=$1', [merchantId]);
     if (current.rows[0]?.muxed_base_id) return BigInt(current.rows[0].muxed_base_id);
-    const index = await this.pool.query(`SELECT COUNT(*)::bigint AS index FROM merchants WHERE created_at <= (SELECT created_at FROM merchants WHERE id=$1)`, [merchantId]);
+    const index = await this.pool.query(
+      `SELECT COUNT(*)::bigint AS index FROM merchants WHERE created_at <= (SELECT created_at FROM merchants WHERE id=$1)`,
+      [merchantId],
+    );
     const base = BigInt(index.rows[0].index) * 16_777_216n;
     await this.pool.query('UPDATE merchants SET muxed_base_id=$2 WHERE id=$1', [merchantId, base.toString()]);
     return base;

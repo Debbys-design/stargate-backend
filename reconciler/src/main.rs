@@ -18,6 +18,8 @@ pub struct Config {
     pub treasury: String,
     pub asset_code: String,
     pub asset_issuer: String,
+    /// Optional EURC issuer address; if unset any EURC issuer is accepted.
+    pub eurc_asset_issuer: Option<String>,
     pub ofac_screening_enabled: bool,
     pub trm_labs_api_key: Option<String>,
 }
@@ -33,6 +35,7 @@ impl Config {
             treasury: get("PLATFORM_TREASURY_PUBLIC_KEY")?,
             asset_code: std::env::var("STELLAR_ASSET_CODE").unwrap_or_else(|_| "USDC".to_string()),
             asset_issuer: get("STELLAR_ASSET_ISSUER")?,
+            eurc_asset_issuer: std::env::var("EURC_ASSET_ISSUER").ok(),
             ofac_screening_enabled: std::env::var("OFAC_SCREENING_ENABLED").unwrap_or_else(|_| "true".into()) == "true",
             trm_labs_api_key: std::env::var("TRM_LABS_API_KEY").ok(),
         })

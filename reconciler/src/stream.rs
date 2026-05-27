@@ -13,6 +13,7 @@ pub struct HorizonPayment {
     pub from: String,
     pub to: String,
     pub amount: String,
+    pub asset_type: Option<String>,
     pub asset_code: Option<String>,
     pub asset_issuer: Option<String>,
     pub transaction_hash: String,
@@ -31,7 +32,10 @@ pub async fn run_with_backoff(db: PgPool, redis: MultiplexedConnection, config: 
 }
 
 async fn run_stream(db: PgPool, mut redis: MultiplexedConnection, config: Config, cursor: String) -> Result<()> {
-    let url = format!("{}/accounts/{}/payments?cursor={}&streaming=on", config.horizon_url, config.treasury, cursor);
+    let url = format!(
+        "{}/accounts/{}/payments?cursor={}&streaming=on",
+        config.horizon_url, config.treasury, cursor
+    );
     let body = reqwest::Client::new()
         .get(url)
         .header(ACCEPT, "text/event-stream")
@@ -46,11 +50,7 @@ async fn run_stream(db: PgPool, mut redis: MultiplexedConnection, config: Config
             continue;
         }
         let payment: HorizonPayment = serde_json::from_str(payload)?;
-        if payment.asset_code.as_deref() == Some(&config.asset_code)
-            && payment.asset_issuer.as_deref() == Some(&config.asset_issuer)
-        {
-            processor::process_payment(&db, &mut redis, &payment, &config).await?;
-        }
+        processor::process_payment(&db, &mut redis, &payment, &config).await?;
     }
     Ok(())
 }
