@@ -7,6 +7,9 @@ const updateMerchantSchema = z.object({
   name: z.string().min(1).optional(),
   stellar_address: z.string().regex(/^G[A-Z0-9]{10,}$/).optional(),
   settlement_cadence: z.enum(['daily', 'weekly']).optional(),
+  daily_spend_limit_usdc: z.number().positive().nullable().optional(),
+  monthly_spend_limit_usdc: z.number().positive().nullable().optional(),
+  settlement_scheduled_at: z.string().datetime().nullable().optional(),
   test_mode: z.boolean().optional(),
   min_invoice_usdc: z.string().regex(/^\d+(\.\d{1,7})?$/).optional(),
   max_invoice_usdc: z.string().regex(/^\d+(\.\d{1,7})?$/).optional(),
@@ -68,6 +71,24 @@ export class MerchantsService {
     const current = await this.findOne(id);
     const result = await this.pool.query(
       `UPDATE merchants
+         SET name=$2,
+             stellar_address=$3,
+             settlement_cadence=COALESCE($4, settlement_cadence),
+             daily_spend_limit_usdc=COALESCE($5, daily_spend_limit_usdc),
+             monthly_spend_limit_usdc=COALESCE($6, monthly_spend_limit_usdc),
+             settlement_scheduled_at=COALESCE($7, settlement_scheduled_at),
+             updated_at=NOW()
+       WHERE id=$1
+       RETURNING *`,
+      [
+        id,
+        dto.name ?? current.name,
+        dto.stellar_address ?? current.stellar_address,
+        dto.settlement_cadence ?? null,
+        dto.daily_spend_limit_usdc ?? null,
+        dto.monthly_spend_limit_usdc ?? null,
+        dto.settlement_scheduled_at ?? null,
+      ],
          SET name=$2, stellar_address=$3, settlement_cadence=COALESCE($4, settlement_cadence),
              test_mode=COALESCE($5, test_mode), updated_at=NOW()
        WHERE id=$1

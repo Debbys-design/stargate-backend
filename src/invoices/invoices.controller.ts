@@ -11,6 +11,14 @@ import { InvoicesService } from './invoices.service';
 export class InvoicesController {
   constructor(private readonly invoices: InvoicesService) {}
 
+  @Post('bulk')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Bulk create up to 100 invoices atomically' })
+  bulk(@Req() req: any, @Body() body: unknown[]) {
+    return this.invoices.createBulk(req.user.merchantId, body);
+  }
+
   @Post()
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
