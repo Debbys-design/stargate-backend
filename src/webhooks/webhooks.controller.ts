@@ -39,4 +39,10 @@ export class WebhooksController {
   retry(@Req() req: any, @Param('id') id: string) {
     return this.webhooks.retry(req.user.merchantId, id);
   }
+
+  @Get(':id/health')
+  @ApiOperation({ summary: 'Webhook health: success rate, latency p99, last failure' })
+  health(@Req() req: any, @Param('id') id: string) {
+    return this.webhooks.health(req.user.merchantId, id);
+  }
 }

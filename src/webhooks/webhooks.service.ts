@@ -66,6 +66,27 @@ export class WebhooksService {
     }
   }
 
+  async health(merchantId: string, webhookId: string) {
+    const result = await this.pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status='delivered') AS delivered,
+         COUNT(*) AS total,
+         PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (delivered_at - created_at)) * 1000) AS latency_p99_ms,
+         MAX(CASE WHEN status IN ('failed','dead') THEN created_at END) AS last_failure_at
+       FROM webhook_deliveries d
+       JOIN webhooks w ON w.id=d.webhook_id
+       WHERE w.id=$1 AND w.merchant_id=$2`,
+      [webhookId, merchantId],
+    );
+    const row = result.rows[0];
+    const total = Number(row.total);
+    return {
+      success_rate: total === 0 ? null : Number(row.delivered) / total,
+      latency_p99_ms: row.latency_p99_ms !== null ? Number(row.latency_p99_ms) : null,
+      last_failure_at: row.last_failure_at ?? null,
+    };
+  }
+
   sign(secret: string, payload: unknown) {
     return `sha256=${createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex')}`;
   }
