@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Pool } from 'pg';
 import { z } from 'zod';
@@ -30,6 +30,7 @@ export class WebhooksService {
 
   async deactivate(merchantId: string, id: string) {
     const result = await this.pool.query('UPDATE webhooks SET active=false WHERE id=$1 AND merchant_id=$2 RETURNING id, active', [id, merchantId]);
+    if (result.rows.length === 0) throw new NotFoundException('Webhook not found');
     return result.rows[0];
   }
 
