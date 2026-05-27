@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Pool } from 'pg';
 import { z } from 'zod';
@@ -24,13 +24,39 @@ export class WebhooksService {
   }
 
   async list(merchantId: string) {
-    const result = await this.pool.query('SELECT id, url, events, active, created_at FROM webhooks WHERE merchant_id=$1 ORDER BY created_at DESC', [merchantId]);
+    const result = await this.pool.query(
+      'SELECT id, url, events, active, created_at, secret_rotated_at FROM webhooks WHERE merchant_id=$1 ORDER BY created_at DESC',
+      [merchantId],
+    );
     return result.rows;
   }
 
   async deactivate(merchantId: string, id: string) {
-    const result = await this.pool.query('UPDATE webhooks SET active=false WHERE id=$1 AND merchant_id=$2 RETURNING id, active', [id, merchantId]);
+    const result = await this.pool.query(
+      'UPDATE webhooks SET active=false WHERE id=$1 AND merchant_id=$2 RETURNING id, active',
+      [id, merchantId],
+    );
+    if (!result.rows[0]) throw new NotFoundException('Webhook not found');
     return result.rows[0];
+  }
+
+  async rotateSecret(merchantId: string, id: string) {
+    const existing = await this.pool.query(
+      'SELECT id, secret FROM webhooks WHERE id=$1 AND merchant_id=$2 AND active=true',
+      [id, merchantId],
+    );
+    if (!existing.rows[0]) throw new NotFoundException('Active webhook not found');
+
+    const newSecret = `whsec_${randomBytes(32).toString('hex')}`;
+    const result = await this.pool.query(
+      `UPDATE webhooks
+          SET previous_secret=secret, secret=$2, secret_rotated_at=NOW()
+        WHERE id=$1 AND merchant_id=$3
+        RETURNING id, url, events, active, secret_rotated_at`,
+      [id, newSecret, merchantId],
+    );
+    // Return new secret once — merchant must store it
+    return { ...result.rows[0], secret: newSecret };
   }
 
   async deliveries(merchantId: string, webhookId: string) {

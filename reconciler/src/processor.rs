@@ -68,6 +68,15 @@ pub async fn process_payment(
         .bind(inv.merchant_id)
         .execute(&mut *tx)
         .await?;
+        // #36 Track conversion for payment link analytics
+        sqlx::query(
+            r#"INSERT INTO payment_link_events (invoice_id, merchant_id, event_type)
+               VALUES ($1, $2, 'conversion')"#,
+        )
+        .bind(inv.id)
+        .bind(inv.merchant_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         let payload = serde_json::json!({ "status": "paid", "invoice_id": inv.id, "tx_hash": payment.transaction_hash });
         redis.publish::<_, _, ()>(format!("invoice:{}", inv.id), payload.to_string()).await?;
