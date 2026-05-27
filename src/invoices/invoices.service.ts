@@ -100,7 +100,8 @@ export class InvoicesService {
 
   async getPublic(id: string) {
     const result = await this.pool.query(
-      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at, m.name AS merchant_name
+      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at,
+              m.name AS merchant_name, m.test_mode
          FROM invoices i
          JOIN merchants m ON m.id=i.merchant_id
         WHERE i.id=$1`,

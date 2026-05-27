@@ -7,6 +7,7 @@ const updateMerchantSchema = z.object({
   name: z.string().min(1).optional(),
   stellar_address: z.string().regex(/^G[A-Z0-9]{10,}$/).optional(),
   settlement_cadence: z.enum(['daily', 'weekly']).optional(),
+  test_mode: z.boolean().optional(),
 });
 
 @Injectable()
@@ -49,10 +50,11 @@ export class MerchantsService {
     const current = await this.findOne(id);
     const result = await this.pool.query(
       `UPDATE merchants
-         SET name=$2, stellar_address=$3, settlement_cadence=COALESCE($4, settlement_cadence), updated_at=NOW()
+         SET name=$2, stellar_address=$3, settlement_cadence=COALESCE($4, settlement_cadence),
+             test_mode=COALESCE($5, test_mode), updated_at=NOW()
        WHERE id=$1
        RETURNING *`,
-      [id, dto.name ?? current.name, dto.stellar_address ?? current.stellar_address, dto.settlement_cadence ?? null],
+      [id, dto.name ?? current.name, dto.stellar_address ?? current.stellar_address, dto.settlement_cadence ?? null, dto.test_mode ?? null],
     );
     return result.rows[0];
   }

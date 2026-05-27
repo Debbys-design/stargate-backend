@@ -15,4 +15,5 @@ export interface UpdateMerchantDto {
   name?: string;
   stellar_address?: string;
   settlement_cadence?: 'daily' | 'weekly';
+  test_mode?: boolean;
 }
