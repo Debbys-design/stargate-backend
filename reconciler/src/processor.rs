@@ -5,6 +5,10 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::str::FromStr;
 
+#[cfg(test)]
+#[path = "processor_tests.rs"]
+mod tests;
+
 pub async fn process_payment(
     db: &PgPool,
     redis: &mut MultiplexedConnection,
@@ -65,6 +69,15 @@ pub async fn process_payment(
         )
         .bind(inv.id)
         .bind(event_id)
+        .bind(inv.merchant_id)
+        .execute(&mut *tx)
+        .await?;
+        // #36 Track conversion for payment link analytics
+        sqlx::query(
+            r#"INSERT INTO payment_link_events (invoice_id, merchant_id, event_type)
+               VALUES ($1, $2, 'conversion')"#,
+        )
+        .bind(inv.id)
         .bind(inv.merchant_id)
         .execute(&mut *tx)
         .await?;

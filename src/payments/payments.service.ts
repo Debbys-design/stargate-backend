@@ -16,7 +16,7 @@ export class PaymentsService {
   async prepareTx(id: string, payer?: string) {
     if (!payer) throw new BadRequestException('payer query parameter is required');
     const invoice = await this.invoices.getPublic(id);
-    return { xdr: await this.stellar.buildPaymentXdr(invoice, payer), network: process.env.STELLAR_NETWORK ?? 'testnet' };
+    return { xdr: await this.stellar.buildPaymentXdr(invoice, payer, invoice.test_mode), network: invoice.test_mode ? 'testnet' : (process.env.STELLAR_NETWORK ?? 'testnet') };
   }
 
   stream(invoiceId: string) {
@@ -25,9 +25,13 @@ export class PaymentsService {
       const heartbeat = setInterval(() => subscriber.next({ data: { type: 'heartbeat' } } as MessageEvent), 15_000);
       redis.subscribe(`invoice:${invoiceId}`).then(() => undefined);
       redis.on('message', (_channel, message) => {
-        const data = JSON.parse(message);
-        subscriber.next({ data } as MessageEvent);
-        if (data.status === 'paid' || data.status === 'expired') subscriber.complete();
+        try {
+          const data = JSON.parse(message);
+          subscriber.next({ data } as MessageEvent);
+          if (data.status === 'paid' || data.status === 'expired') subscriber.complete();
+        } catch {
+          // Ignore malformed messages, continue streaming
+        }
       });
       return () => {
         clearInterval(heartbeat);

@@ -12,8 +12,9 @@ export class StellarService {
     return account.accountId();
   }
 
-  async buildPaymentXdr(invoice: { muxed_address: string; gross_usdc: string }, payerPublicKey: string) {
-    const network = this.config.get<string>('STELLAR_NETWORK') === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
+  async buildPaymentXdr(invoice: { muxed_address: string; gross_usdc: string }, payerPublicKey: string, testMode?: boolean) {
+    const networkEnv = this.config.get<string>('STELLAR_NETWORK') === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
+    const network = testMode === true ? Networks.TESTNET : testMode === false ? Networks.PUBLIC : networkEnv;
     try {
       Keypair.fromPublicKey(payerPublicKey);
     } catch {

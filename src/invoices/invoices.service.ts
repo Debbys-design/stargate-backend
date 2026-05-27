@@ -5,6 +5,7 @@ import PDFDocument from 'pdfkit';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
+import { IdempotencyService } from '../idempotency/idempotency.service';
 import { MerchantsService } from '../merchants/merchants.service';
 import { StellarService } from '../stellar/stellar.service';
 
@@ -38,12 +39,44 @@ export class InvoicesService {
     private readonly merchants: MerchantsService,
     private readonly stellar: StellarService,
     private readonly config: ConfigService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
-  async create(merchantId: string, input: unknown) {
+  async create(merchantId: string, input: unknown, idempotencyKey?: string) {
+    const bodyHash = this.idempotency.hashBody(input);
+
+    if (idempotencyKey) {
+      const cached = await this.idempotency.check(merchantId, idempotencyKey, bodyHash);
+      if (cached) return cached;
+    }
     const dto = createInvoiceSchema.parse(input);
+    
+    // Check for existing invoice with same idempotency key
+    if (idempotencyKey) {
+      const existing = await this.pool.query(
+        'SELECT *, $3::text || \'/pay/\' || id AS payment_url FROM invoices WHERE merchant_id=$1 AND idempotency_key=$2',
+        [merchantId, idempotencyKey, this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance')],
+      );
+      if (existing.rows[0]) return existing.rows[0];
+    }
+
     const merchant = await this.merchants.findOne(merchantId);
     const amount = toUnits(dto.amount_usdc);
+    
+    // Validate against merchant invoice limits
+    if (merchant.min_invoice_usdc) {
+      const minAmount = toUnits(merchant.min_invoice_usdc);
+      if (amount < minAmount) {
+        throw new BadRequestException(`Invoice amount must be at least ${merchant.min_invoice_usdc} USDC`);
+      }
+    }
+    if (merchant.max_invoice_usdc) {
+      const maxAmount = toUnits(merchant.max_invoice_usdc);
+      if (amount > maxAmount) {
+        throw new BadRequestException(`Invoice amount cannot exceed ${merchant.max_invoice_usdc} USDC`);
+      }
+    }
+    
     const fee = this.calculateFee(amount, merchant);
     const gross = amount + fee;
     const net = amount - this.fixedFeeUnits(merchant);
@@ -55,9 +88,9 @@ export class InvoicesService {
 
     const result = await this.pool.query(
       `INSERT INTO invoices
-         (merchant_id, amount_usdc, gross_usdc, fee_usdc, net_usdc, description, muxed_id, muxed_address, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       RETURNING *, $10::text || '/pay/' || id AS payment_url`,
+         (merchant_id, amount_usdc, gross_usdc, fee_usdc, net_usdc, description, muxed_id, muxed_address, expires_at, idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING *, $11::text || '/pay/' || id AS payment_url`,
       [
         merchantId,
         fromUnits(amount),
@@ -68,28 +101,49 @@ export class InvoicesService {
         muxedId.toString(),
         muxedAddress,
         expiresAt,
+        idempotencyKey ?? null,
         this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance'),
       ],
     );
-    return result.rows[0];
+    const invoice = result.rows[0];
+
+    if (idempotencyKey) {
+      await this.idempotency.save(merchantId, idempotencyKey, bodyHash, invoice);
+    }
+
+    return invoice;
   }
 
   async list(merchantId: string, query: any) {
-    const page = Math.max(Number(query.page ?? 1), 1);
     const limit = Math.min(Math.max(Number(query.limit ?? 20), 1), 100);
     const status = query.status;
-    const params: any[] = [merchantId, limit, (page - 1) * limit];
-    const statusSql = status ? 'AND status=$4' : '';
+    const cursor = query.cursor; // Format: "created_at:id"
+    
+    let params: any[] = [merchantId, limit + 1];
+    let cursorSql = '';
+    
+    if (cursor) {
+      const [createdAt, id] = cursor.split(':');
+      cursorSql = 'AND (created_at, id) < ($3::timestamptz, $4::uuid)';
+      params.push(createdAt, id);
+    }
+    
+    const statusSql = status ? `AND status=$${params.length + 1}` : '';
     if (status) params.push(status);
+    
     const result = await this.pool.query(
-      `SELECT *, COUNT(*) OVER() AS total
-         FROM invoices
-        WHERE merchant_id=$1 ${statusSql}
-        ORDER BY created_at DESC
-        LIMIT $2 OFFSET $3`,
+      `SELECT * FROM invoices
+        WHERE merchant_id=$1 ${cursorSql} ${statusSql}
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2`,
       params,
     );
-    return { page, limit, total: Number(result.rows[0]?.total ?? 0), items: result.rows };
+    
+    const hasMore = result.rows.length > limit;
+    const items = hasMore ? result.rows.slice(0, limit) : result.rows;
+    const nextCursor = hasMore ? `${items[items.length - 1].created_at.toISOString()}:${items[items.length - 1].id}` : null;
+    
+    return { limit, items, nextCursor };
   }
 
   async get(merchantId: string, id: string) {
@@ -101,7 +155,8 @@ export class InvoicesService {
 
   async getPublic(id: string) {
     const result = await this.pool.query(
-      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at, m.name AS merchant_name
+      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at,
+              m.name AS merchant_name, m.test_mode
          FROM invoices i
          JOIN merchants m ON m.id=i.merchant_id
         WHERE i.id=$1`,

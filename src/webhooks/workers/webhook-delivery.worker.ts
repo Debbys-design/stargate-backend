@@ -18,7 +18,7 @@ export class WebhookDeliveryWorker {
   @Cron('*/30 * * * * *')
   async deliverPending() {
     const result = await this.pool.query(
-      `SELECT d.*, w.url, w.secret
+      `SELECT d.*, w.url, w.secret, w.previous_secret, w.secret_rotated_at
          FROM webhook_deliveries d
          JOIN webhooks w ON w.id=d.webhook_id
         WHERE w.active=true
@@ -35,12 +35,25 @@ export class WebhookDeliveryWorker {
 
   private async deliver(delivery: any) {
     const attempts = Number(delivery.attempts) + 1;
+    // During a 24-hour grace window after rotation, include both signatures
+    // so the merchant can verify with either the old or new secret.
+    const signatures = [this.webhooks.sign(delivery.secret, delivery.payload)];
+    if (delivery.previous_secret && delivery.secret_rotated_at) {
+      const rotatedAt = new Date(delivery.secret_rotated_at).getTime();
+      const graceMs = 24 * 60 * 60 * 1000;
+      if (Date.now() - rotatedAt < graceMs) {
+        signatures.push(this.webhooks.sign(delivery.previous_secret, delivery.payload));
+      }
+    }
+
     try {
       const response = await fetch(delivery.url, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-stargate-signature': this.webhooks.sign(delivery.secret, delivery.payload),
+          'x-stargate-signature': signatures[0],
+          // Include previous signature in a separate header during grace period
+          ...(signatures[1] ? { 'x-stargate-signature-prev': signatures[1] } : {}),
           'x-stargate-event': delivery.event_type,
         },
         body: JSON.stringify(delivery.payload),
