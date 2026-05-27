@@ -8,6 +8,7 @@ import { DATABASE_POOL } from '../database/database.module';
 import { IdempotencyService } from '../idempotency/idempotency.service';
 import { MerchantsService } from '../merchants/merchants.service';
 import { StellarService } from '../stellar/stellar.service';
+import { WebhooksService } from '../webhooks/webhooks.service';
 
 const createInvoiceSchema = z.object({
   amount_usdc: z
@@ -40,6 +41,7 @@ export class InvoicesService {
     private readonly merchants: MerchantsService,
     private readonly stellar: StellarService,
     private readonly config: ConfigService,
+    private readonly webhooks: WebhooksService,
     private readonly idempotency: IdempotencyService,
   ) {}
 
@@ -281,6 +283,11 @@ export class InvoicesService {
 
   @Cron('0 */5 * * * *')
   async expireInvoices() {
+    const result = await this.pool.query(
+      `UPDATE invoices SET status='expired' WHERE status='pending' AND expires_at < NOW() RETURNING id, merchant_id`,
+    );
+    for (const row of result.rows) {
+      await this.webhooks.dispatchEvent(row.merchant_id, 'merchant.payment_intent.expired', { invoice_id: row.id, expired_at: new Date().toISOString() });
     await this.pool.query(`UPDATE invoices SET status='expired' WHERE status IN ('pending','partial') AND expires_at < NOW()`);
   }
 

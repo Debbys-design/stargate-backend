@@ -9,6 +9,7 @@ import { AuditService } from '../audit/audit.service';
 
 const createWebhookSchema = z.object({
   url: z.string().url().refine((url) => url.startsWith('https://'), 'Webhook URL must use https'),
+  events: z.array(z.enum(['invoice.paid', 'invoice.expired', 'invoice.cancelled', 'settlement.completed', 'merchant.payment_intent.expired'])).min(1),
   events: z.array(z.enum(['invoice.paid', 'invoice.expired', 'invoice.cancelled', 'settlement.completed', 'merchant.kyc.approved', 'merchant.kyc.rejected'])).min(1),
 });
 
@@ -125,6 +126,38 @@ export class WebhooksService {
     return result.rows[0];
   }
 
+  async dispatchEvent(merchantId: string, eventType: string, payload: Record<string, unknown>) {
+    const hooks = await this.pool.query(
+      `SELECT id FROM webhooks WHERE merchant_id=$1 AND active=true AND $2=ANY(events)`,
+      [merchantId, eventType],
+    );
+    for (const hook of hooks.rows) {
+      await this.pool.query(
+        `INSERT INTO webhook_deliveries (webhook_id, event_type, payload) VALUES ($1,$2,$3)`,
+        [hook.id, eventType, payload],
+      );
+    }
+  }
+
+  async health(merchantId: string, webhookId: string) {
+    const result = await this.pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status='delivered') AS delivered,
+         COUNT(*) AS total,
+         PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (delivered_at - created_at)) * 1000) AS latency_p99_ms,
+         MAX(CASE WHEN status IN ('failed','dead') THEN created_at END) AS last_failure_at
+       FROM webhook_deliveries d
+       JOIN webhooks w ON w.id=d.webhook_id
+       WHERE w.id=$1 AND w.merchant_id=$2`,
+      [webhookId, merchantId],
+    );
+    const row = result.rows[0];
+    const total = Number(row.total);
+    return {
+      success_rate: total === 0 ? null : Number(row.delivered) / total,
+      latency_p99_ms: row.latency_p99_ms !== null ? Number(row.latency_p99_ms) : null,
+      last_failure_at: row.last_failure_at ?? null,
+    };
   async emitKycEvent(merchantId: string, status: 'approved' | 'rejected') {
     const eventType = `merchant.kyc.${status}` as const;
     await this.pool.query(

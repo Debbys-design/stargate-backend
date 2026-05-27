@@ -9,6 +9,7 @@ export interface Webhook {
 
 export interface CreateWebhookDto {
   url: string;
+  events: Array<'invoice.paid' | 'invoice.expired' | 'invoice.cancelled' | 'settlement.completed' | 'merchant.payment_intent.expired'>;
   events: Array<'invoice.paid' | 'invoice.expired' | 'invoice.cancelled' | 'settlement.completed' | 'merchant.kyc.approved' | 'merchant.kyc.rejected'>;
 }
 

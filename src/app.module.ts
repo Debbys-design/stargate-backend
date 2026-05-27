@@ -11,6 +11,7 @@ import { AuditModule } from './audit/audit.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { validate } from './config/validate';
 import { DatabaseModule } from './database/database.module';
+import { EstimatesModule } from './estimates/estimates.module';
 import { HealthModule } from './health/health.module';
 import { IdempotencyModule } from './idempotency/idempotency.module';
 import { InvoicesModule } from './invoices/invoices.module';
@@ -68,6 +69,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     PaymentLinksModule,
     WebhooksModule,
     SettlementModule,
+    EstimatesModule,
     SchedulesModule,
     AuditLogsModule,
     AdminModule,
