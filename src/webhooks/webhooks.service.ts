@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
@@ -16,9 +16,10 @@ export class WebhooksService {
   async create(merchantId: string, input: unknown) {
     const dto = createWebhookSchema.parse(input);
     const secret = `whsec_${randomBytes(32).toString('hex')}`;
+    const hashedSecret = createHash('sha256').update(secret).digest('hex');
     const result = await this.pool.query(
-      `INSERT INTO webhooks (merchant_id, url, events, secret) VALUES ($1,$2,$3,$4) RETURNING *`,
-      [merchantId, dto.url, dto.events, secret],
+      `INSERT INTO webhooks (merchant_id, url, events, hashed_secret) VALUES ($1,$2,$3,$4) RETURNING id, url, events, active, created_at`,
+      [merchantId, dto.url, dto.events, hashedSecret],
     );
     return { ...result.rows[0], secret };
   }
@@ -61,5 +62,10 @@ export class WebhooksService {
     const expected = Buffer.from(this.sign(secret, payload));
     const actual = Buffer.from(signature);
     return expected.length === actual.length && timingSafeEqual(expected, actual);
+  }
+
+  async getSecretForVerification(webhookId: string): Promise<string | null> {
+    const result = await this.pool.query('SELECT hashed_secret FROM webhooks WHERE id=$1', [webhookId]);
+    return result.rows[0]?.hashed_secret ?? null;
   }
 }
