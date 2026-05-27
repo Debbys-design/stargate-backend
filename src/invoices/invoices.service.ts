@@ -1,9 +1,11 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
+import PDFDocument from 'pdfkit';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
+import { IdempotencyService } from '../idempotency/idempotency.service';
 import { MerchantsService } from '../merchants/merchants.service';
 import { StellarService } from '../stellar/stellar.service';
 
@@ -38,13 +40,45 @@ export class InvoicesService {
     private readonly merchants: MerchantsService,
     private readonly stellar: StellarService,
     private readonly config: ConfigService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
-  async create(merchantId: string, input: unknown) {
+  async create(merchantId: string, input: unknown, idempotencyKey?: string) {
+    const bodyHash = this.idempotency.hashBody(input);
+
+    if (idempotencyKey) {
+      const cached = await this.idempotency.check(merchantId, idempotencyKey, bodyHash);
+      if (cached) return cached;
+    }
     const dto = createInvoiceSchema.parse(input);
+    
+    // Check for existing invoice with same idempotency key
+    if (idempotencyKey) {
+      const existing = await this.pool.query(
+        'SELECT *, $3::text || \'/pay/\' || id AS payment_url FROM invoices WHERE merchant_id=$1 AND idempotency_key=$2',
+        [merchantId, idempotencyKey, this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance')],
+      );
+      if (existing.rows[0]) return existing.rows[0];
+    }
+
     const merchant = await this.merchants.findOne(merchantId);
     const amount = toUnits(dto.amount_usdc);
     await this.enforceSpendLimits(merchantId, merchant, amount);
+    
+    // Validate against merchant invoice limits
+    if (merchant.min_invoice_usdc) {
+      const minAmount = toUnits(merchant.min_invoice_usdc);
+      if (amount < minAmount) {
+        throw new BadRequestException(`Invoice amount must be at least ${merchant.min_invoice_usdc} USDC`);
+      }
+    }
+    if (merchant.max_invoice_usdc) {
+      const maxAmount = toUnits(merchant.max_invoice_usdc);
+      if (amount > maxAmount) {
+        throw new BadRequestException(`Invoice amount cannot exceed ${merchant.max_invoice_usdc} USDC`);
+      }
+    }
+    
     const fee = this.calculateFee(amount, merchant);
     const gross = amount + fee;
     const net = amount - this.fixedFeeUnits(merchant);
@@ -60,6 +94,9 @@ export class InvoicesService {
           muxed_id, muxed_address, expires_at, amount_remaining_usdc, partial_payments_enabled)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        RETURNING *, $12::text || '/pay/' || id AS payment_url`,
+         (merchant_id, amount_usdc, gross_usdc, fee_usdc, net_usdc, description, muxed_id, muxed_address, expires_at, idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING *, $11::text || '/pay/' || id AS payment_url`,
       [
         merchantId,
         fromUnits(amount),
@@ -72,10 +109,17 @@ export class InvoicesService {
         expiresAt,
         fromUnits(gross),
         dto.partial_payments_enabled,
+        idempotencyKey ?? null,
         this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance'),
       ],
     );
-    return result.rows[0];
+    const invoice = result.rows[0];
+
+    if (idempotencyKey) {
+      await this.idempotency.save(merchantId, idempotencyKey, bodyHash, invoice);
+    }
+
+    return invoice;
   }
 
   async createBulk(merchantId: string, inputs: unknown[]) {
@@ -99,21 +143,35 @@ export class InvoicesService {
   }
 
   async list(merchantId: string, query: any) {
-    const page = Math.max(Number(query.page ?? 1), 1);
     const limit = Math.min(Math.max(Number(query.limit ?? 20), 1), 100);
     const status = query.status;
-    const params: any[] = [merchantId, limit, (page - 1) * limit];
-    const statusSql = status ? 'AND status=$4' : '';
+    const cursor = query.cursor; // Format: "created_at:id"
+    
+    let params: any[] = [merchantId, limit + 1];
+    let cursorSql = '';
+    
+    if (cursor) {
+      const [createdAt, id] = cursor.split(':');
+      cursorSql = 'AND (created_at, id) < ($3::timestamptz, $4::uuid)';
+      params.push(createdAt, id);
+    }
+    
+    const statusSql = status ? `AND status=$${params.length + 1}` : '';
     if (status) params.push(status);
+    
     const result = await this.pool.query(
-      `SELECT *, COUNT(*) OVER() AS total
-         FROM invoices
-        WHERE merchant_id=$1 ${statusSql}
-        ORDER BY created_at DESC
-        LIMIT $2 OFFSET $3`,
+      `SELECT * FROM invoices
+        WHERE merchant_id=$1 ${cursorSql} ${statusSql}
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2`,
       params,
     );
-    return { page, limit, total: Number(result.rows[0]?.total ?? 0), items: result.rows };
+    
+    const hasMore = result.rows.length > limit;
+    const items = hasMore ? result.rows.slice(0, limit) : result.rows;
+    const nextCursor = hasMore ? `${items[items.length - 1].created_at.toISOString()}:${items[items.length - 1].id}` : null;
+    
+    return { limit, items, nextCursor };
   }
 
   async get(merchantId: string, id: string) {
@@ -125,7 +183,8 @@ export class InvoicesService {
 
   async getPublic(id: string) {
     const result = await this.pool.query(
-      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at, m.name AS merchant_name
+      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at,
+              m.name AS merchant_name, m.test_mode
          FROM invoices i
          JOIN merchants m ON m.id=i.merchant_id
         WHERE i.id=$1`,
@@ -133,6 +192,45 @@ export class InvoicesService {
     );
     if (!result.rows[0]) throw new NotFoundException('Invoice not found');
     return result.rows[0];
+  }
+
+  async refund(merchantId: string, id: string) {
+    const invoice = await this.get(merchantId, id);
+    if (invoice.status !== 'paid') throw new BadRequestException('Only paid invoices can be refunded');
+    const existing = await this.pool.query(
+      `SELECT id FROM refunds WHERE invoice_id=$1 AND status NOT IN ('failed')`,
+      [id],
+    );
+    if (existing.rows[0]) throw new BadRequestException('Refund already initiated for this invoice');
+    const merchant = await this.merchants.findOne(merchantId);
+    if (!merchant.stellar_address) throw new BadRequestException('Merchant has no stellar_address set');
+    const txHash = await this.stellar.submitSorobanRefund(invoice, merchant.stellar_address);
+    const result = await this.pool.query(
+      `INSERT INTO refunds (invoice_id, merchant_id, amount_usdc, status, soroban_tx_hash)
+       VALUES ($1,$2,$3,'submitted',$4) RETURNING *`,
+      [id, merchantId, invoice.amount_usdc, txHash],
+    );
+    return result.rows[0];
+  }
+
+  async generatePdf(merchantId: string, id: string) {
+    const { payment_events: _events, ...invoice } = await this.get(merchantId, id);
+    const merchant = await this.merchants.findOne(merchantId);
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    doc.fontSize(20).text('Invoice Receipt', { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(12);
+    doc.text(`Merchant: ${merchant.name}`);
+    doc.text(`Invoice ID: ${invoice.id}`);
+    doc.text(`Status: ${invoice.status}`);
+    doc.text(`Amount (USDC): ${invoice.amount_usdc}`);
+    doc.text(`Fee (USDC): ${invoice.fee_usdc}`);
+    doc.text(`Net (USDC): ${invoice.net_usdc}`);
+    if (invoice.description) doc.text(`Description: ${invoice.description}`);
+    doc.text(`Created: ${new Date(invoice.created_at).toISOString()}`);
+    if (invoice.paid_at) doc.text(`Paid: ${new Date(invoice.paid_at).toISOString()}`);
+    doc.end();
+    return doc;
   }
 
   async cancel(merchantId: string, id: string) {
