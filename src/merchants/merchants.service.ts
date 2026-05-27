@@ -9,6 +9,7 @@ const updateMerchantSchema = z.object({
   settlement_cadence: z.enum(['daily', 'weekly']).optional(),
   daily_spend_limit_usdc: z.number().positive().nullable().optional(),
   monthly_spend_limit_usdc: z.number().positive().nullable().optional(),
+  settlement_scheduled_at: z.string().datetime().nullable().optional(),
 });
 
 @Injectable()
@@ -46,6 +47,7 @@ export class MerchantsService {
              settlement_cadence=COALESCE($4, settlement_cadence),
              daily_spend_limit_usdc=COALESCE($5, daily_spend_limit_usdc),
              monthly_spend_limit_usdc=COALESCE($6, monthly_spend_limit_usdc),
+             settlement_scheduled_at=COALESCE($7, settlement_scheduled_at),
              updated_at=NOW()
        WHERE id=$1
        RETURNING *`,
@@ -56,6 +58,7 @@ export class MerchantsService {
         dto.settlement_cadence ?? null,
         dto.daily_spend_limit_usdc ?? null,
         dto.monthly_spend_limit_usdc ?? null,
+        dto.settlement_scheduled_at ?? null,
       ],
     );
     return result.rows[0];
