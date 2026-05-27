@@ -4,12 +4,18 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { ScheduleModule } from '@nestjs/schedule';
+import { AuditLogsModule } from './audit-logs/audit-logs.module';
+import { AuthModule } from './auth/auth.module';
 import { AuthModule } from './auth/auth.module';
 import { AuditModule } from './audit/audit.module';
 import { ComplianceModule } from './compliance/compliance.module';
 import { validate } from './config/validate';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
+import { IdempotencyModule } from './idempotency/idempotency.module';
+import { InvoicesModule } from './invoices/invoices.module';
+import { MerchantsModule } from './merchants/merchants.module';
+import { PaymentLinksModule } from './payment-links/payment-links.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { MerchantsModule } from './merchants/merchants.module';
 import { PaymentsModule } from './payments/payments.module';
@@ -55,10 +61,13 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     MerchantsModule,
     StellarModule,
     ComplianceModule,
+    IdempotencyModule,
     InvoicesModule,
     PaymentsModule,
+    PaymentLinksModule,
     WebhooksModule,
     SettlementModule,
+    AuditLogsModule,
     AdminModule,
     TreasuryModule,
     DevModule,

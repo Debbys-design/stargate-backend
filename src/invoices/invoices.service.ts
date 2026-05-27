@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
+import { IdempotencyService } from '../idempotency/idempotency.service';
 import { MerchantsService } from '../merchants/merchants.service';
 import { StellarService } from '../stellar/stellar.service';
 
@@ -37,9 +38,16 @@ export class InvoicesService {
     private readonly merchants: MerchantsService,
     private readonly stellar: StellarService,
     private readonly config: ConfigService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
   async create(merchantId: string, input: unknown, idempotencyKey?: string) {
+    const bodyHash = this.idempotency.hashBody(input);
+
+    if (idempotencyKey) {
+      const cached = await this.idempotency.check(merchantId, idempotencyKey, bodyHash);
+      if (cached) return cached;
+    }
     const dto = createInvoiceSchema.parse(input);
     
     // Check for existing invoice with same idempotency key
@@ -96,7 +104,13 @@ export class InvoicesService {
         this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance'),
       ],
     );
-    return result.rows[0];
+    const invoice = result.rows[0];
+
+    if (idempotencyKey) {
+      await this.idempotency.save(merchantId, idempotencyKey, bodyHash, invoice);
+    }
+
+    return invoice;
   }
 
   async list(merchantId: string, query: any) {
