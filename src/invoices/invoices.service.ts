@@ -78,6 +78,26 @@ export class InvoicesService {
     return result.rows[0];
   }
 
+  async createBulk(merchantId: string, inputs: unknown[]) {
+    if (!Array.isArray(inputs) || inputs.length === 0 || inputs.length > 100)
+      throw new BadRequestException('Provide between 1 and 100 invoices');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const results: any[] = [];
+      for (const input of inputs) {
+        results.push(await this.create(merchantId, input));
+      }
+      await client.query('COMMIT');
+      return results;
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
   async list(merchantId: string, query: any) {
     const page = Math.max(Number(query.page ?? 1), 1);
     const limit = Math.min(Math.max(Number(query.limit ?? 20), 1), 100);
