@@ -10,6 +10,12 @@ import { MerchantsService } from './merchants.service';
 export class MerchantsController {
   constructor(private readonly merchants: MerchantsService) {}
 
+  @Get('me/onboarding')
+  @ApiOperation({ summary: 'Merchant onboarding steps and completion status' })
+  onboarding(@Req() req: any) {
+    return this.merchants.onboarding(req.user.merchantId);
+  }
+
   @Get('me')
   @ApiOperation({ summary: 'Current merchant profile' })
   me(@Req() req: any) {
