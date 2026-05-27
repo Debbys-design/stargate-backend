@@ -13,7 +13,8 @@ export class WebhooksController {
   @Post()
   @ApiOperation({ summary: 'Register webhook' })
   create(@Req() req: any, @Body() body: unknown) {
-    return this.webhooks.create(req.user.merchantId, body);
+    const actorIp = req.ip || req.connection.remoteAddress;
+    return this.webhooks.create(req.user.merchantId, body, actorIp, req.user.email);
   }
 
   @Get()
@@ -31,7 +32,8 @@ export class WebhooksController {
   @Delete(':id')
   @ApiOperation({ summary: 'Deactivate webhook' })
   remove(@Req() req: any, @Param('id') id: string) {
-    return this.webhooks.deactivate(req.user.merchantId, id);
+    const actorIp = req.ip || req.connection.remoteAddress;
+    return this.webhooks.deactivate(req.user.merchantId, id, actorIp, req.user.email);
   }
 
   @Get(':id/deliveries')
@@ -43,6 +45,7 @@ export class WebhooksController {
   @Post('deliveries/:id/retry')
   @ApiOperation({ summary: 'Retry failed delivery' })
   retry(@Req() req: any, @Param('id') id: string) {
-    return this.webhooks.retry(req.user.merchantId, id);
+    const actorIp = req.ip || req.connection.remoteAddress;
+    return this.webhooks.retry(req.user.merchantId, id, actorIp, req.user.email);
   }
 }
