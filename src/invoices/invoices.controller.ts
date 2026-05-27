@@ -39,6 +39,14 @@ export class InvoicesController {
     return this.invoices.get(req.user.merchantId, id);
   }
 
+  @Post(':id/refund')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Initiate Soroban-settled refund' })
+  refund(@Req() req: any, @Param('id') id: string) {
+    return this.invoices.refund(req.user.merchantId, id);
+  }
+
   @Get(':id/pdf')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)

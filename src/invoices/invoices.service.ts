@@ -111,6 +111,25 @@ export class InvoicesService {
     return result.rows[0];
   }
 
+  async refund(merchantId: string, id: string) {
+    const invoice = await this.get(merchantId, id);
+    if (invoice.status !== 'paid') throw new BadRequestException('Only paid invoices can be refunded');
+    const existing = await this.pool.query(
+      `SELECT id FROM refunds WHERE invoice_id=$1 AND status NOT IN ('failed')`,
+      [id],
+    );
+    if (existing.rows[0]) throw new BadRequestException('Refund already initiated for this invoice');
+    const merchant = await this.merchants.findOne(merchantId);
+    if (!merchant.stellar_address) throw new BadRequestException('Merchant has no stellar_address set');
+    const txHash = await this.stellar.submitSorobanRefund(invoice, merchant.stellar_address);
+    const result = await this.pool.query(
+      `INSERT INTO refunds (invoice_id, merchant_id, amount_usdc, status, soroban_tx_hash)
+       VALUES ($1,$2,$3,'submitted',$4) RETURNING *`,
+      [id, merchantId, invoice.amount_usdc, txHash],
+    );
+    return result.rows[0];
+  }
+
   async generatePdf(merchantId: string, id: string) {
     const { payment_events: _events, ...invoice } = await this.get(merchantId, id);
     const merchant = await this.merchants.findOne(merchantId);
