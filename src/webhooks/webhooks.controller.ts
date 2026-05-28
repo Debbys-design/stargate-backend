@@ -24,7 +24,7 @@ export class WebhooksController {
   }
 
   @Post(':id/rotate-secret')
-  @ApiOperation({ summary: 'Rotate webhook secret with overlap window' })
+  @ApiOperation({ summary: 'Rotate webhook signing secret with 24-hour overlap window' })
   rotateSecret(@Req() req: any, @Param('id') id: string) {
     return this.webhooks.rotateSecret(req.user.merchantId, id);
   }
@@ -34,13 +34,6 @@ export class WebhooksController {
   remove(@Req() req: any, @Param('id') id: string) {
     const actorIp = req.ip || req.connection.remoteAddress;
     return this.webhooks.deactivate(req.user.merchantId, id, actorIp, req.user.email);
-  }
-
-  /** #27 — Rotate the HMAC signing secret for a webhook endpoint */
-  @Post(':id/rotate-secret')
-  @ApiOperation({ summary: 'Rotate webhook signing secret' })
-  rotateSecret(@Req() req: any, @Param('id') id: string) {
-    return this.webhooks.rotateSecret(req.user.merchantId, id);
   }
 
   @Get(':id/deliveries')

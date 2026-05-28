@@ -3,12 +3,14 @@ import { MerchantsService } from '../src/merchants/merchants.service';
 
 describe('KYC webhook events', () => {
   const mockPool = { query: jest.fn() };
+  const mockAudit = { log: jest.fn() };
   let webhooks: WebhooksService;
   let merchants: MerchantsService;
 
   beforeEach(() => {
     mockPool.query.mockReset();
-    webhooks = new WebhooksService(mockPool as any);
+    mockAudit.log.mockReset();
+    webhooks = new WebhooksService(mockPool as any, mockAudit as any);
     merchants = new MerchantsService(mockPool as any);
   });
 
