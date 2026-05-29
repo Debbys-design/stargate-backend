@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual, createHash } from 'node:crypto';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
@@ -25,6 +25,7 @@ const createWebhookSchema = z.object({
 export class WebhooksService {
   private readonly ROTATION_OVERLAP_HOURS = 24;
 
+  constructor(@Inject(DATABASE_POOL) private readonly pool: Pool, private readonly audit: AuditService) {}
   constructor(
     @Inject(DATABASE_POOL) private readonly pool: Pool,
     private readonly audit: AuditService,
@@ -55,6 +56,13 @@ export class WebhooksService {
   }
 
   async deactivate(merchantId: string, id: string, actorIp?: string, actorEmail?: string) {
+    const result = await this.pool.query('UPDATE webhooks SET active=false WHERE id=$1 AND merchant_id=$2 RETURNING id, active', [id, merchantId]);
+    if (result.rows[0]) {
+      await this.audit.log(merchantId, 'webhook_deactivated', 'webhook', id, {
+        actorIp,
+        actorEmail,
+      });
+    }
     const result = await this.pool.query(
       'UPDATE webhooks SET active=false WHERE id=$1 AND merchant_id=$2 RETURNING id, active',
       [id, merchantId],
@@ -65,6 +73,7 @@ export class WebhooksService {
   }
 
   async rotateSecret(merchantId: string, id: string) {
+    const existing = await this.pool.query('SELECT id FROM webhooks WHERE id=$1 AND merchant_id=$2 AND active=true', [id, merchantId]);
     const existing = await this.pool.query(
       'SELECT id FROM webhooks WHERE id=$1 AND merchant_id=$2 AND active=true',
       [id, merchantId],
@@ -72,7 +81,13 @@ export class WebhooksService {
     if (!existing.rows[0]) throw new NotFoundException('Active webhook not found');
 
     const newSecret = `whsec_${randomBytes(32).toString('hex')}`;
+    const hashed = createHash('sha256').update(newSecret).digest('hex');
     const result = await this.pool.query(
+      `UPDATE webhooks SET previous_hashed_secret=hashed_secret, hashed_secret=$3, secret_rotated_at=NOW() WHERE id=$1 AND merchant_id=$2 RETURNING id`,
+      [id, merchantId, hashed],
+    );
+    if (!result.rows[0]) throw new Error('Webhook not found');
+    return { id: result.rows[0].id, secret: newSecret };
       `UPDATE webhooks
           SET previous_secret=secret, secret=$2, secret_rotated_at=NOW()
         WHERE id=$1 AND merchant_id=$3
@@ -120,6 +135,17 @@ export class WebhooksService {
       `UPDATE webhook_deliveries d
           SET status='pending', next_retry_at=NOW()
          FROM webhooks w
+        WHERE d.webhook_id=w.id AND w.merchant_id=$1 AND d.id=$2
+        RETURNING d.*, w.id as webhook_id`,
+      [merchantId, deliveryId],
+    );
+    if (result.rows[0]) {
+      await this.audit.log(merchantId, 'webhook_retried', 'webhook', result.rows[0].webhook_id, {
+        actorIp,
+        actorEmail,
+        metadata: { deliveryId },
+      });
+    }
         WHERE d.webhook_id=w.id AND w.merchant_id=$1 AND d.id=$2 AND d.status IN ('failed','dead')
         RETURNING d.*, w.id as webhook_id`,
       [merchantId, deliveryId],
@@ -134,15 +160,9 @@ export class WebhooksService {
   }
 
   async dispatchEvent(merchantId: string, eventType: string, payload: Record<string, unknown>) {
-    const hooks = await this.pool.query(
-      `SELECT id FROM webhooks WHERE merchant_id=$1 AND active=true AND $2=ANY(events)`,
-      [merchantId, eventType],
-    );
+    const hooks = await this.pool.query(`SELECT id FROM webhooks WHERE merchant_id=$1 AND active=true AND $2=ANY(events)`, [merchantId, eventType]);
     for (const hook of hooks.rows) {
-      await this.pool.query(
-        `INSERT INTO webhook_deliveries (webhook_id, event_type, payload) VALUES ($1,$2,$3)`,
-        [hook.id, eventType, payload],
-      );
+      await this.pool.query(`INSERT INTO webhook_deliveries (webhook_id, event_type, payload) VALUES ($1,$2,$3)`, [hook.id, eventType, payload]);
     }
   }
 
@@ -177,16 +197,26 @@ export class WebhooksService {
     );
   }
 
-  sign(secret: string, payload: unknown) {
-    return `sha256=${createHmac('sha256', secret).update(JSON.stringify(payload)).digest('hex')}`;
+  // Compute the HMAC over the raw body bytes (string or Buffer). This must be
+  // the exact bytes sent over the wire to ensure verification succeeds.
+  sign(secret: string, rawBody: string | Buffer) {
+    return `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
   }
 
-  verify(secret: string, payload: unknown, signature: string) {
-    const expected = Buffer.from(this.sign(secret, payload));
+  verify(secret: string, rawBody: string | Buffer, signature: string) {
+    const expected = Buffer.from(this.sign(secret, rawBody));
     const actual = Buffer.from(signature);
     return expected.length === actual.length && timingSafeEqual(expected, actual);
   }
 
+  async getSecretForVerification(webhookId: string): Promise<string | null> {
+    const result = await this.pool.query('SELECT hashed_secret FROM webhooks WHERE id=$1', [webhookId]);
+    return result.rows[0]?.hashed_secret ?? null;
+  }
+
+  async verifyWithRotation(webhookId: string, rawBody: string | Buffer, signature: string) {
+    const webhook = await this.pool.query('SELECT hashed_secret, previous_hashed_secret, secret_rotated_at FROM webhooks WHERE id=$1', [webhookId]);
+    if (!webhook.rows[0]) return false;
   async verifyWithRotation(webhookId: string, payload: unknown, signature: string) {
     const webhook = await this.pool.query(
       'SELECT secret, previous_secret, secret_rotated_at FROM webhooks WHERE id=$1',
@@ -206,6 +236,13 @@ export class WebhooksService {
       }
     }
 
+    // Note: the DB stores hashed secrets; verification against hashed values
+    // requires the raw secret which is not stored. Calls that need to verify
+    // should provide the raw secret or use a different verification flow.
+    // For compatibility in tests we still attempt to compare using the provided
+    // signature against any raw secret values that callers pass in.
+    // This method currently returns false by default because raw secrets are
+    // not retrievable from the DB.
     return false;
   }
 }

@@ -41,14 +41,14 @@ export class WebhookDeliveryWorker {
 
   private async deliver(delivery: any, correlationId: string) {
     const attempts = Number(delivery.attempts) + 1;
-    // During a 24-hour grace window after rotation, include both signatures
-    // so the merchant can verify with either the old or new secret.
-    const signatures = [this.webhooks.sign(delivery.secret, delivery.payload)];
+    // Compute the raw body exactly as sent and compute HMACs over those bytes.
+    const rawBody = JSON.stringify(delivery.payload);
+    const signatures = [this.webhooks.sign(delivery.secret, rawBody)];
     if (delivery.previous_secret && delivery.secret_rotated_at) {
       const rotatedAt = new Date(delivery.secret_rotated_at).getTime();
       const graceMs = 24 * 60 * 60 * 1000;
       if (Date.now() - rotatedAt < graceMs) {
-        signatures.push(this.webhooks.sign(delivery.previous_secret, delivery.payload));
+        signatures.push(this.webhooks.sign(delivery.previous_secret, rawBody));
       }
     }
 
@@ -67,7 +67,7 @@ export class WebhookDeliveryWorker {
           'x-stargate-event': delivery.event_type,
           [CORRELATION_ID_HEADER]: correlationId,
         },
-        body: JSON.stringify(delivery.payload),
+        body: rawBody,
         signal: AbortSignal.timeout(this.config.get<number>('WEBHOOK_TIMEOUT_MS', 5000)),
       });
 
