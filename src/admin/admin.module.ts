@@ -1,3 +1,10 @@
 import { Module } from '@nestjs/common';
-@Module({})
+import { MerchantsModule } from '../merchants/merchants.module';
+import { WebhooksModule } from '../webhooks/webhooks.module';
+import { AdminController } from './admin.controller';
+
+@Module({
+  imports: [MerchantsModule, WebhooksModule],
+  controllers: [AdminController],
+})
 export class AdminModule {}

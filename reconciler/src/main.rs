@@ -3,6 +3,7 @@ mod matcher;
 mod metrics;
 mod processor;
 mod soroban_indexer;
+mod status;
 mod stream;
 
 use anyhow::{Context, Result};
@@ -71,5 +72,12 @@ async fn main() -> Result<()> {
         });
     }
 
+    let status_port: u16 = std::env::var("RECONCILER_STATUS_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9090);
+    let addr: std::net::SocketAddr = ([0, 0, 0, 0], status_port).into();
+    let redis_for_status = client.get_multiplexed_async_connection().await?;
+    tokio::spawn(status::serve(addr, redis_for_status));
     stream::run_with_backoff(db, redis, config, cursor).await
 }

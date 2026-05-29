@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import { RedisSubscriptionService } from './redis-subscription.service';
 
 export const REDIS = Symbol('REDIS');
 
@@ -16,7 +17,8 @@ export const REDIS = Symbol('REDIS');
           maxRetriesPerRequest: 1,
         }),
     },
+    RedisSubscriptionService,
   ],
-  exports: [REDIS],
+  exports: [REDIS, RedisSubscriptionService],
 })
 export class RedisModule {}

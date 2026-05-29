@@ -1,11 +1,14 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
+import PDFDocument from 'pdfkit';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
+import { IdempotencyService } from '../idempotency/idempotency.service';
 import { MerchantsService } from '../merchants/merchants.service';
 import { StellarService } from '../stellar/stellar.service';
+import { WebhooksService } from '../webhooks/webhooks.service';
 
 const createInvoiceSchema = z.object({
   amount_usdc: z
@@ -13,6 +16,7 @@ const createInvoiceSchema = z.object({
     .transform((value) => String(value)),
   description: z.string().max(500).optional(),
   expires_in_minutes: z.number().int().min(5).max(10080).default(60),
+  partial_payments_enabled: z.boolean().default(false),
 });
 
 const SCALE = 10_000_000n;
@@ -37,12 +41,46 @@ export class InvoicesService {
     private readonly merchants: MerchantsService,
     private readonly stellar: StellarService,
     private readonly config: ConfigService,
+    private readonly webhooks: WebhooksService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
-  async create(merchantId: string, input: unknown) {
+  async create(merchantId: string, input: unknown, idempotencyKey?: string) {
+    const bodyHash = this.idempotency.hashBody(input);
+
+    if (idempotencyKey) {
+      const cached = await this.idempotency.check(merchantId, idempotencyKey, bodyHash);
+      if (cached) return cached;
+    }
     const dto = createInvoiceSchema.parse(input);
+    
+    // Check for existing invoice with same idempotency key
+    if (idempotencyKey) {
+      const existing = await this.pool.query(
+        'SELECT *, $3::text || \'/pay/\' || id AS payment_url FROM invoices WHERE merchant_id=$1 AND idempotency_key=$2',
+        [merchantId, idempotencyKey, this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance')],
+      );
+      if (existing.rows[0]) return existing.rows[0];
+    }
+
     const merchant = await this.merchants.findOne(merchantId);
     const amount = toUnits(dto.amount_usdc);
+    await this.enforceSpendLimits(merchantId, merchant, amount);
+    
+    // Validate against merchant invoice limits
+    if (merchant.min_invoice_usdc) {
+      const minAmount = toUnits(merchant.min_invoice_usdc);
+      if (amount < minAmount) {
+        throw new BadRequestException(`Invoice amount must be at least ${merchant.min_invoice_usdc} USDC`);
+      }
+    }
+    if (merchant.max_invoice_usdc) {
+      const maxAmount = toUnits(merchant.max_invoice_usdc);
+      if (amount > maxAmount) {
+        throw new BadRequestException(`Invoice amount cannot exceed ${merchant.max_invoice_usdc} USDC`);
+      }
+    }
+    
     const fee = this.calculateFee(amount, merchant);
     const gross = amount + fee;
     const net = amount - this.fixedFeeUnits(merchant);
@@ -54,9 +92,13 @@ export class InvoicesService {
 
     const result = await this.pool.query(
       `INSERT INTO invoices
-         (merchant_id, amount_usdc, gross_usdc, fee_usdc, net_usdc, description, muxed_id, muxed_address, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       RETURNING *, $10::text || '/pay/' || id AS payment_url`,
+         (merchant_id, amount_usdc, gross_usdc, fee_usdc, net_usdc, description,
+          muxed_id, muxed_address, expires_at, amount_remaining_usdc, partial_payments_enabled)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       RETURNING *, $12::text || '/pay/' || id AS payment_url`,
+         (merchant_id, amount_usdc, gross_usdc, fee_usdc, net_usdc, description, muxed_id, muxed_address, expires_at, idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING *, $11::text || '/pay/' || id AS payment_url`,
       [
         merchantId,
         fromUnits(amount),
@@ -67,28 +109,71 @@ export class InvoicesService {
         muxedId.toString(),
         muxedAddress,
         expiresAt,
+        fromUnits(gross),
+        dto.partial_payments_enabled,
+        idempotencyKey ?? null,
         this.config.get<string>('PUBLIC_PAY_URL', 'https://pay.stargate.finance'),
       ],
     );
-    return result.rows[0];
+    const invoice = result.rows[0];
+
+    if (idempotencyKey) {
+      await this.idempotency.save(merchantId, idempotencyKey, bodyHash, invoice);
+    }
+
+    return invoice;
+  }
+
+  async createBulk(merchantId: string, inputs: unknown[]) {
+    if (!Array.isArray(inputs) || inputs.length === 0 || inputs.length > 100)
+      throw new BadRequestException('Provide between 1 and 100 invoices');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const results: any[] = [];
+      for (const input of inputs) {
+        results.push(await this.create(merchantId, input));
+      }
+      await client.query('COMMIT');
+      return results;
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
   }
 
   async list(merchantId: string, query: any) {
-    const page = Math.max(Number(query.page ?? 1), 1);
     const limit = Math.min(Math.max(Number(query.limit ?? 20), 1), 100);
     const status = query.status;
-    const params: any[] = [merchantId, limit, (page - 1) * limit];
-    const statusSql = status ? 'AND status=$4' : '';
+    const cursor = query.cursor; // Format: "created_at:id"
+    
+    let params: any[] = [merchantId, limit + 1];
+    let cursorSql = '';
+    
+    if (cursor) {
+      const [createdAt, id] = cursor.split(':');
+      cursorSql = 'AND (created_at, id) < ($3::timestamptz, $4::uuid)';
+      params.push(createdAt, id);
+    }
+    
+    const statusSql = status ? `AND status=$${params.length + 1}` : '';
     if (status) params.push(status);
+    
     const result = await this.pool.query(
-      `SELECT *, COUNT(*) OVER() AS total
-         FROM invoices
-        WHERE merchant_id=$1 ${statusSql}
-        ORDER BY created_at DESC
-        LIMIT $2 OFFSET $3`,
+      `SELECT * FROM invoices
+        WHERE merchant_id=$1 ${cursorSql} ${statusSql}
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2`,
       params,
     );
-    return { page, limit, total: Number(result.rows[0]?.total ?? 0), items: result.rows };
+    
+    const hasMore = result.rows.length > limit;
+    const items = hasMore ? result.rows.slice(0, limit) : result.rows;
+    const nextCursor = hasMore ? `${items[items.length - 1].created_at.toISOString()}:${items[items.length - 1].id}` : null;
+    
+    return { limit, items, nextCursor };
   }
 
   async get(merchantId: string, id: string) {
@@ -100,7 +185,8 @@ export class InvoicesService {
 
   async getPublic(id: string) {
     const result = await this.pool.query(
-      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at, m.name AS merchant_name
+      `SELECT i.id, i.gross_usdc, i.description, i.status, i.muxed_address, i.expires_at,
+              m.name AS merchant_name, m.test_mode
          FROM invoices i
          JOIN merchants m ON m.id=i.merchant_id
         WHERE i.id=$1`,
@@ -110,10 +196,49 @@ export class InvoicesService {
     return result.rows[0];
   }
 
+  async refund(merchantId: string, id: string) {
+    const invoice = await this.get(merchantId, id);
+    if (invoice.status !== 'paid') throw new BadRequestException('Only paid invoices can be refunded');
+    const existing = await this.pool.query(
+      `SELECT id FROM refunds WHERE invoice_id=$1 AND status NOT IN ('failed')`,
+      [id],
+    );
+    if (existing.rows[0]) throw new BadRequestException('Refund already initiated for this invoice');
+    const merchant = await this.merchants.findOne(merchantId);
+    if (!merchant.stellar_address) throw new BadRequestException('Merchant has no stellar_address set');
+    const txHash = await this.stellar.submitSorobanRefund(invoice, merchant.stellar_address);
+    const result = await this.pool.query(
+      `INSERT INTO refunds (invoice_id, merchant_id, amount_usdc, status, soroban_tx_hash)
+       VALUES ($1,$2,$3,'submitted',$4) RETURNING *`,
+      [id, merchantId, invoice.amount_usdc, txHash],
+    );
+    return result.rows[0];
+  }
+
+  async generatePdf(merchantId: string, id: string) {
+    const { payment_events: _events, ...invoice } = await this.get(merchantId, id);
+    const merchant = await this.merchants.findOne(merchantId);
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    doc.fontSize(20).text('Invoice Receipt', { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(12);
+    doc.text(`Merchant: ${merchant.name}`);
+    doc.text(`Invoice ID: ${invoice.id}`);
+    doc.text(`Status: ${invoice.status}`);
+    doc.text(`Amount (USDC): ${invoice.amount_usdc}`);
+    doc.text(`Fee (USDC): ${invoice.fee_usdc}`);
+    doc.text(`Net (USDC): ${invoice.net_usdc}`);
+    if (invoice.description) doc.text(`Description: ${invoice.description}`);
+    doc.text(`Created: ${new Date(invoice.created_at).toISOString()}`);
+    if (invoice.paid_at) doc.text(`Paid: ${new Date(invoice.paid_at).toISOString()}`);
+    doc.end();
+    return doc;
+  }
+
   async cancel(merchantId: string, id: string) {
     const result = await this.pool.query(
       `UPDATE invoices SET status='cancelled'
-        WHERE id=$1 AND merchant_id=$2 AND status='pending'
+        WHERE id=$1 AND merchant_id=$2 AND status IN ('pending','partial')
         RETURNING *`,
       [id, merchantId],
     );
@@ -121,9 +246,128 @@ export class InvoicesService {
     return result.rows[0];
   }
 
+  async applyPartialPayment(invoiceId: string, paidAmount: string) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(
+        `SELECT * FROM invoices WHERE id=$1 AND status IN ('pending','partial') FOR UPDATE`,
+        [invoiceId],
+      );
+      if (!rows[0]) throw new NotFoundException('Active invoice not found');
+      const invoice = rows[0];
+      if (!invoice.partial_payments_enabled) throw new BadRequestException('Partial payments not enabled for this invoice');
+      const paid = toUnits(paidAmount);
+      const remaining = toUnits(String(invoice.amount_remaining_usdc)) - paid;
+      if (remaining < 0n) throw new BadRequestException('Payment exceeds remaining balance');
+      const newStatus = remaining === 0n ? 'paid' : 'partial';
+      const updated = await client.query(
+        `UPDATE invoices
+            SET amount_paid_usdc = amount_paid_usdc + $2,
+                amount_remaining_usdc = $3,
+                status = $4,
+                paid_at = CASE WHEN $4='paid' THEN NOW() ELSE NULL END
+          WHERE id=$1
+          RETURNING *`,
+        [invoiceId, paidAmount, fromUnits(remaining), newStatus],
+      );
+      await client.query('COMMIT');
+      return updated.rows[0];
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
   @Cron('0 */5 * * * *')
   async expireInvoices() {
-    await this.pool.query(`UPDATE invoices SET status='expired' WHERE status='pending' AND expires_at < NOW()`);
+    // Keep existing expiry behavior based on invoice.expires_at
+    const result = await this.pool.query(
+      `UPDATE invoices SET status='expired'
+       WHERE status='pending' AND expires_at < NOW()
+       RETURNING id, merchant_id`,
+    );
+    for (const row of result.rows) {
+      await this.webhooks.dispatchEvent(row.merchant_id, 'merchant.payment_intent.expired', {
+        invoice_id: row.id,
+        expired_at: new Date().toISOString(),
+        reason: 'expires_at',
+      });
+    }
+
+    await this.pool.query(
+      `UPDATE invoices
+         SET status='expired'
+       WHERE status IN ('pending','partial') AND expires_at < NOW()`,
+    );
+  }
+
+  @Cron('30 */5 * * * *')
+  async autoCancelUnpaidInvoices() {
+    // Merchant-configured TTL (unpaid_invoice_ttl_minutes) for unpaid invoices.
+    // If the TTL elapses, cancel invoices that are still not paid.
+    const result = await this.pool.query(
+      `UPDATE invoices i
+         SET status='cancelled'
+       FROM merchants m
+      WHERE i.merchant_id = m.id
+        AND i.status IN ('pending','partial')
+        AND m.unpaid_invoice_ttl_minutes IS NOT NULL
+        AND (i.created_at + (m.unpaid_invoice_ttl_minutes || ' minutes')::interval) < NOW()
+      RETURNING i.id, i.merchant_id`,
+    );
+
+    for (const row of result.rows) {
+      // Reuse existing event model currently used for expiry notifications.
+      // Webhook consumers can treat this as a payment-intent expiry.
+      await this.webhooks.dispatchEvent(row.merchant_id, 'merchant.payment_intent.expired', {
+        invoice_id: row.id,
+        expired_at: new Date().toISOString(),
+        reason: 'unpaid_invoice_ttl',
+      });
+
+      // Also emit the explicit cancellation event when supported.
+      await this.webhooks.dispatchEvent(row.merchant_id, 'invoice.cancelled', {
+        invoice_id: row.id,
+        cancelled_at: new Date().toISOString(),
+        reason: 'unpaid_invoice_ttl',
+      });
+    }
+      await this.webhooks.dispatchEvent(
+        row.merchant_id,
+        'merchant.payment_intent.expired',
+        { invoice_id: row.id, expired_at: new Date().toISOString() },
+      );
+    }
+
+    // Mark all expired pending/partial invoices as expired
+    await this.pool.query(
+    for (const row of result.rows) {
+      await this.webhooks.dispatchEvent(row.merchant_id, 'merchant.payment_intent.expired', { invoice_id: row.id, expired_at: new Date().toISOString() });
+    await this.pool.query(`UPDATE invoices SET status='expired' WHERE status IN ('pending','partial') AND expires_at < NOW()`);
+  }
+
+  private async enforceSpendLimits(merchantId: string, merchant: any, amount: bigint) {
+    if (merchant.daily_spend_limit_usdc) {
+      const { rows } = await this.pool.query(
+        `SELECT COALESCE(SUM(amount_usdc::numeric),0) AS total FROM invoices
+          WHERE merchant_id=$1 AND created_at >= date_trunc('day', NOW()) AND status != 'cancelled'`,
+        [merchantId],
+      );
+      if (toUnits(String(rows[0].total)) + amount > toUnits(String(merchant.daily_spend_limit_usdc)))
+        throw new BadRequestException('Daily spend limit exceeded');
+    }
+    if (merchant.monthly_spend_limit_usdc) {
+      const { rows } = await this.pool.query(
+        `SELECT COALESCE(SUM(amount_usdc::numeric),0) AS total FROM invoices
+          WHERE merchant_id=$1 AND created_at >= date_trunc('month', NOW()) AND status != 'cancelled'`,
+        [merchantId],
+      );
+      if (toUnits(String(rows[0].total)) + amount > toUnits(String(merchant.monthly_spend_limit_usdc)))
+        throw new BadRequestException('Monthly spend limit exceeded');
+    }
   }
 
   private calculateFee(amount: bigint, merchant: any) {
