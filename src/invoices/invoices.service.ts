@@ -335,6 +335,18 @@ export class InvoicesService {
         reason: 'unpaid_invoice_ttl',
       });
     }
+      await this.webhooks.dispatchEvent(
+        row.merchant_id,
+        'merchant.payment_intent.expired',
+        { invoice_id: row.id, expired_at: new Date().toISOString() },
+      );
+    }
+
+    // Mark all expired pending/partial invoices as expired
+    await this.pool.query(
+    for (const row of result.rows) {
+      await this.webhooks.dispatchEvent(row.merchant_id, 'merchant.payment_intent.expired', { invoice_id: row.id, expired_at: new Date().toISOString() });
+    await this.pool.query(`UPDATE invoices SET status='expired' WHERE status IN ('pending','partial') AND expires_at < NOW()`);
   }
 
   private async enforceSpendLimits(merchantId: string, merchant: any, amount: bigint) {
