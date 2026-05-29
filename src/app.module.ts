@@ -5,6 +5,8 @@ import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ApiKeysModule } from './api-keys/api-keys.module';
+import { AuditModule } from './audit/audit.module';
 import { AdminModule } from './admin/admin.module';
 import { AuditModule } from './audit/audit.module';
 import { AuditLogsModule } from './audit-logs/audit-logs.module';
@@ -26,6 +28,7 @@ import { PaymentsModule } from './payments/payments.module';
 import { RedisModule } from './redis/redis.module';
 import { SchedulesModule } from './schedules/schedules.module';
 import { SettlementModule } from './settlement/settlement.module';
+import { SorobanEventsModule } from './soroban-events/soroban-events.module';
 import { StellarModule } from './stellar/stellar.module';
 import { TeamMembersModule } from './team-members/team-members.module';
 import { TreasuryModule } from './treasury/treasury.module';
@@ -61,6 +64,9 @@ import { MetricsMiddleware } from './metrics/metrics.middleware';
     PaymentLinksModule,
     WebhooksModule,
     SettlementModule,
+    ApiKeysModule,
+    AuditModule,
+    SorobanEventsModule,
     EstimatesModule,
     SchedulesModule,
     AuditLogsModule,
