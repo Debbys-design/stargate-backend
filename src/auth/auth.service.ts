@@ -85,7 +85,23 @@ export class AuthService {
   }
 
   private signAccess(merchant: any) {
-    return this.jwt.signAsync({ sub: merchant.id, email: merchant.email, tier: merchant.tier });
+    return this.jwt.signAsync({
+      sub: merchant.id,
+      email: merchant.email,
+      tier: merchant.tier,
+      role: merchant.role ?? 'owner',
+      merchantId: merchant.merchantId ?? merchant.id,
+    });
+  }
+
+  async signTeamMemberAccess(member: { id: string; email: string; role: string; merchantId: string; tier: string }) {
+    return this.jwt.signAsync({
+      sub: member.id,
+      email: member.email,
+      tier: member.tier,
+      role: member.role,
+      merchantId: member.merchantId,
+    });
   }
 
   private accessTokenTtlSeconds() {

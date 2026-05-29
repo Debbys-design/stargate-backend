@@ -44,6 +44,11 @@ scripts/pre-launch-audit.sh
 
 Operational runbooks live in `docs/LAUNCH_RUNBOOK.md` and `docs/RECOVERY.md`.
 
+## Changelog and Versioning
+
+See [CHANGELOG.md](CHANGELOG.md) for a record of all notable changes.
+See [docs/VERSIONING.md](docs/VERSIONING.md) for the semantic versioning and release policy.
+
 ## License
 
 MIT
