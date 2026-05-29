@@ -26,14 +26,17 @@ export class WebhooksService {
   private readonly ROTATION_OVERLAP_HOURS = 24;
 
   constructor(@Inject(DATABASE_POOL) private readonly pool: Pool, private readonly audit: AuditService) {}
+  constructor(
+    @Inject(DATABASE_POOL) private readonly pool: Pool,
+    private readonly audit: AuditService,
+  ) {}
 
   async create(merchantId: string, input: unknown, actorIp?: string, actorEmail?: string) {
     const dto = createWebhookSchema.parse(input);
     const secret = `whsec_${randomBytes(32).toString('hex')}`;
-    const hashedSecret = createHash('sha256').update(secret).digest('hex');
     const result = await this.pool.query(
-      `INSERT INTO webhooks (merchant_id, url, events, hashed_secret) VALUES ($1,$2,$3,$4) RETURNING id, url, events, active, created_at`,
-      [merchantId, dto.url, dto.events, hashedSecret],
+      `INSERT INTO webhooks (merchant_id, url, events, secret) VALUES ($1,$2,$3,$4) RETURNING id, url, events, active, created_at`,
+      [merchantId, dto.url, dto.events, secret],
     );
     const webhook = result.rows[0];
     await this.audit.log(merchantId, 'webhook_created', 'webhook', webhook.id, {
@@ -60,12 +63,21 @@ export class WebhooksService {
         actorEmail,
       });
     }
+    const result = await this.pool.query(
+      'UPDATE webhooks SET active=false WHERE id=$1 AND merchant_id=$2 RETURNING id, active',
+      [id, merchantId],
+    );
     if (result.rows.length === 0) throw new NotFoundException('Webhook not found');
+    await this.audit.log(merchantId, 'webhook_deactivated', 'webhook', id, { actorIp, actorEmail });
     return result.rows[0];
   }
 
   async rotateSecret(merchantId: string, id: string) {
     const existing = await this.pool.query('SELECT id FROM webhooks WHERE id=$1 AND merchant_id=$2 AND active=true', [id, merchantId]);
+    const existing = await this.pool.query(
+      'SELECT id FROM webhooks WHERE id=$1 AND merchant_id=$2 AND active=true',
+      [id, merchantId],
+    );
     if (!existing.rows[0]) throw new NotFoundException('Active webhook not found');
 
     const newSecret = `whsec_${randomBytes(32).toString('hex')}`;
@@ -76,14 +88,46 @@ export class WebhooksService {
     );
     if (!result.rows[0]) throw new Error('Webhook not found');
     return { id: result.rows[0].id, secret: newSecret };
+      `UPDATE webhooks
+          SET previous_secret=secret, secret=$2, secret_rotated_at=NOW()
+        WHERE id=$1 AND merchant_id=$3
+        RETURNING id, url, events, active, secret_rotated_at`,
+      [id, newSecret, merchantId],
+    );
+    if (!result.rows[0]) throw new NotFoundException('Webhook not found');
+    // Return new secret once — merchant must store it immediately
+    return { ...result.rows[0], secret: newSecret };
   }
 
   async deliveries(merchantId: string, webhookId: string) {
+    // Verify the webhook belongs to this merchant
+    const hook = await this.pool.query(
+      'SELECT id FROM webhooks WHERE id=$1 AND merchant_id=$2',
+      [webhookId, merchantId],
+    );
+    if (!hook.rows[0]) throw new NotFoundException('Webhook not found');
+
     const result = await this.pool.query(
-      `SELECT d.* FROM webhook_deliveries d JOIN webhooks w ON w.id=d.webhook_id WHERE w.merchant_id=$1 AND w.id=$2 ORDER BY d.created_at DESC`,
-      [merchantId, webhookId],
+      `SELECT id, webhook_id, event_type, status, attempts, response_status, delivered_at, next_retry_at, created_at
+         FROM webhook_deliveries
+        WHERE webhook_id=$1
+        ORDER BY created_at DESC`,
+      [webhookId],
     );
     return result.rows;
+  }
+
+  async deliveryById(merchantId: string, webhookId: string, deliveryId: string) {
+    const result = await this.pool.query(
+      `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.status, d.attempts,
+              d.response_status, d.delivered_at, d.next_retry_at, d.created_at
+         FROM webhook_deliveries d
+         JOIN webhooks w ON w.id = d.webhook_id
+        WHERE w.merchant_id=$1 AND d.webhook_id=$2 AND d.id=$3`,
+      [merchantId, webhookId, deliveryId],
+    );
+    if (!result.rows[0]) throw new NotFoundException('Delivery not found');
+    return result.rows[0];
   }
 
   async retry(merchantId: string, deliveryId: string, actorIp?: string, actorEmail?: string) {
@@ -102,7 +146,16 @@ export class WebhooksService {
         metadata: { deliveryId },
       });
     }
+        WHERE d.webhook_id=w.id AND w.merchant_id=$1 AND d.id=$2 AND d.status IN ('failed','dead')
+        RETURNING d.*, w.id as webhook_id`,
+      [merchantId, deliveryId],
+    );
     if (result.rows.length === 0) throw new NotFoundException('Delivery not found or cannot be retried');
+    await this.audit.log(merchantId, 'webhook_retried', 'webhook', result.rows[0].webhook_id, {
+      actorIp,
+      actorEmail,
+      metadata: { deliveryId },
+    });
     return result.rows[0];
   }
 
@@ -164,6 +217,24 @@ export class WebhooksService {
   async verifyWithRotation(webhookId: string, rawBody: string | Buffer, signature: string) {
     const webhook = await this.pool.query('SELECT hashed_secret, previous_hashed_secret, secret_rotated_at FROM webhooks WHERE id=$1', [webhookId]);
     if (!webhook.rows[0]) return false;
+  async verifyWithRotation(webhookId: string, payload: unknown, signature: string) {
+    const webhook = await this.pool.query(
+      'SELECT secret, previous_secret, secret_rotated_at FROM webhooks WHERE id=$1',
+      [webhookId],
+    );
+    if (!webhook.rows[0]) return false;
+
+    const { secret, previous_secret, secret_rotated_at } = webhook.rows[0];
+
+    if (this.verify(secret, payload, signature)) return true;
+
+    if (previous_secret && secret_rotated_at) {
+      const hoursSinceRotation =
+        (Date.now() - new Date(secret_rotated_at).getTime()) / (1000 * 60 * 60);
+      if (hoursSinceRotation < this.ROTATION_OVERLAP_HOURS) {
+        return this.verify(previous_secret, payload, signature);
+      }
+    }
 
     // Note: the DB stores hashed secrets; verification against hashed values
     // requires the raw secret which is not stored. Calls that need to verify

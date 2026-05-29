@@ -283,9 +283,67 @@ export class InvoicesService {
 
   @Cron('0 */5 * * * *')
   async expireInvoices() {
+    // Keep existing expiry behavior based on invoice.expires_at
     const result = await this.pool.query(
-      `UPDATE invoices SET status='expired' WHERE status='pending' AND expires_at < NOW() RETURNING id, merchant_id`,
+      `UPDATE invoices SET status='expired'
+       WHERE status='pending' AND expires_at < NOW()
+       RETURNING id, merchant_id`,
     );
+    for (const row of result.rows) {
+      await this.webhooks.dispatchEvent(row.merchant_id, 'merchant.payment_intent.expired', {
+        invoice_id: row.id,
+        expired_at: new Date().toISOString(),
+        reason: 'expires_at',
+      });
+    }
+
+    await this.pool.query(
+      `UPDATE invoices
+         SET status='expired'
+       WHERE status IN ('pending','partial') AND expires_at < NOW()`,
+    );
+  }
+
+  @Cron('30 */5 * * * *')
+  async autoCancelUnpaidInvoices() {
+    // Merchant-configured TTL (unpaid_invoice_ttl_minutes) for unpaid invoices.
+    // If the TTL elapses, cancel invoices that are still not paid.
+    const result = await this.pool.query(
+      `UPDATE invoices i
+         SET status='cancelled'
+       FROM merchants m
+      WHERE i.merchant_id = m.id
+        AND i.status IN ('pending','partial')
+        AND m.unpaid_invoice_ttl_minutes IS NOT NULL
+        AND (i.created_at + (m.unpaid_invoice_ttl_minutes || ' minutes')::interval) < NOW()
+      RETURNING i.id, i.merchant_id`,
+    );
+
+    for (const row of result.rows) {
+      // Reuse existing event model currently used for expiry notifications.
+      // Webhook consumers can treat this as a payment-intent expiry.
+      await this.webhooks.dispatchEvent(row.merchant_id, 'merchant.payment_intent.expired', {
+        invoice_id: row.id,
+        expired_at: new Date().toISOString(),
+        reason: 'unpaid_invoice_ttl',
+      });
+
+      // Also emit the explicit cancellation event when supported.
+      await this.webhooks.dispatchEvent(row.merchant_id, 'invoice.cancelled', {
+        invoice_id: row.id,
+        cancelled_at: new Date().toISOString(),
+        reason: 'unpaid_invoice_ttl',
+      });
+    }
+      await this.webhooks.dispatchEvent(
+        row.merchant_id,
+        'merchant.payment_intent.expired',
+        { invoice_id: row.id, expired_at: new Date().toISOString() },
+      );
+    }
+
+    // Mark all expired pending/partial invoices as expired
+    await this.pool.query(
     for (const row of result.rows) {
       await this.webhooks.dispatchEvent(row.merchant_id, 'merchant.payment_intent.expired', { invoice_id: row.id, expired_at: new Date().toISOString() });
     await this.pool.query(`UPDATE invoices SET status='expired' WHERE status IN ('pending','partial') AND expires_at < NOW()`);
