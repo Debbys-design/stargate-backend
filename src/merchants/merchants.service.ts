@@ -13,6 +13,7 @@ const updateMerchantSchema = z.object({
   test_mode: z.boolean().optional(),
   min_invoice_usdc: z.string().regex(/^\d+(\.\d{1,7})?$/).optional(),
   max_invoice_usdc: z.string().regex(/^\d+(\.\d{1,7})?$/).optional(),
+  unpaid_invoice_ttl_minutes: z.number().int().positive().max(10080).nullable().optional(),
 });
 
 @Injectable()
@@ -47,6 +48,7 @@ export class MerchantsService {
       this.pool.query('SELECT 1 FROM webhooks WHERE merchant_id=$1 AND active=true LIMIT 1', [id]),
       this.pool.query('SELECT 1 FROM recurring_schedules WHERE merchant_id=$1 LIMIT 1', [id]),
     ]);
+
     const steps = [
       { key: 'profile_complete', label: 'Complete merchant profile', done: !!(merchant.name && merchant.stellar_address) },
       { key: 'kyb_verified', label: 'KYB verification', done: !!merchant.kyb_verified_at },
@@ -54,8 +56,11 @@ export class MerchantsService {
       { key: 'webhook_configured', label: 'Configure a webhook', done: webhookRow.rowCount! > 0 },
       { key: 'schedule_created', label: 'Set up a recurring schedule', done: scheduleRow.rowCount! > 0 },
     ];
+
     const completed = steps.filter((s) => s.done).length;
     return { completed, total: steps.length, percent: Math.round((completed / steps.length) * 100), steps };
+  }
+
   async updateKycStatus(id: string, status: 'approved' | 'rejected') {
     const result = await this.pool.query(
       `UPDATE merchants SET kyc_status=$2, kyb_verified_at=CASE WHEN $2='approved' THEN NOW() ELSE NULL END, updated_at=NOW()
@@ -69,6 +74,7 @@ export class MerchantsService {
   async update(id: string, input: unknown) {
     const dto = updateMerchantSchema.parse(input);
     const current = await this.findOne(id);
+
     const result = await this.pool.query(
       `UPDATE merchants
          SET name=$2,
@@ -77,6 +83,10 @@ export class MerchantsService {
              daily_spend_limit_usdc=COALESCE($5, daily_spend_limit_usdc),
              monthly_spend_limit_usdc=COALESCE($6, monthly_spend_limit_usdc),
              settlement_scheduled_at=COALESCE($7, settlement_scheduled_at),
+             test_mode=COALESCE($8, test_mode),
+             min_invoice_usdc=COALESCE($9, min_invoice_usdc),
+             max_invoice_usdc=COALESCE($10, max_invoice_usdc),
+             unpaid_invoice_ttl_minutes=COALESCE($11, unpaid_invoice_ttl_minutes),
              updated_at=NOW()
        WHERE id=$1
        RETURNING *`,
@@ -88,18 +98,14 @@ export class MerchantsService {
         dto.daily_spend_limit_usdc ?? null,
         dto.monthly_spend_limit_usdc ?? null,
         dto.settlement_scheduled_at ?? null,
+        dto.test_mode ?? null,
+        dto.min_invoice_usdc ?? null,
+        dto.max_invoice_usdc ?? null,
+        dto.unpaid_invoice_ttl_minutes ?? null,
       ],
-         SET name=$2, stellar_address=$3, settlement_cadence=COALESCE($4, settlement_cadence),
-             test_mode=COALESCE($5, test_mode), updated_at=NOW()
-       WHERE id=$1
-       RETURNING *`,
-      [id, dto.name ?? current.name, dto.stellar_address ?? current.stellar_address, dto.settlement_cadence ?? null, dto.test_mode ?? null],
-         SET name=$2, stellar_address=$3, settlement_cadence=COALESCE($4, settlement_cadence), 
-             min_invoice_usdc=COALESCE($5, min_invoice_usdc), max_invoice_usdc=COALESCE($6, max_invoice_usdc), updated_at=NOW()
-       WHERE id=$1
-       RETURNING *`,
-      [id, dto.name ?? current.name, dto.stellar_address ?? current.stellar_address, dto.settlement_cadence ?? null, dto.min_invoice_usdc ?? null, dto.max_invoice_usdc ?? null],
     );
+
     return result.rows[0];
   }
 }
+
