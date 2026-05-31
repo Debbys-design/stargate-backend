@@ -7,6 +7,8 @@ describe('KYC webhook events', () => {
   let webhooks: WebhooksService;
   let merchants: MerchantsService;
 
+  const mockAudit = { log: jest.fn() };
+
   beforeEach(() => {
     mockPool.query.mockReset();
     mockAudit.log.mockReset();

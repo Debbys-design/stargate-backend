@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+git statusimport { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Pool } from 'pg';
 import { z } from 'zod';
 import { DATABASE_POOL } from '../database/database.module';
@@ -13,6 +13,7 @@ const updateMerchantSchema = z.object({
   test_mode: z.boolean().optional(),
   min_invoice_usdc: z.string().regex(/^\d+(\.\d{1,7})?$/).optional(),
   max_invoice_usdc: z.string().regex(/^\d+(\.\d{1,7})?$/).optional(),
+  unpaid_invoice_ttl_minutes: z.number().int().positive().max(10080).nullable().optional(),
 });
 
 @Injectable()
@@ -47,6 +48,7 @@ export class MerchantsService {
       this.pool.query('SELECT 1 FROM webhooks WHERE merchant_id=$1 AND active=true LIMIT 1', [id]),
       this.pool.query('SELECT 1 FROM recurring_schedules WHERE merchant_id=$1 LIMIT 1', [id]),
     ]);
+
     const steps = [
       { key: 'profile_complete', label: 'Complete merchant profile', done: !!(merchant.name && merchant.stellar_address) },
       { key: 'kyb_verified', label: 'KYB verification', done: !!merchant.kyb_verified_at },
@@ -54,6 +56,7 @@ export class MerchantsService {
       { key: 'webhook_configured', label: 'Configure a webhook', done: webhookRow.rowCount! > 0 },
       { key: 'schedule_created', label: 'Set up a recurring schedule', done: scheduleRow.rowCount! > 0 },
     ];
+
     const completed = steps.filter((s) => s.done).length;
     return { completed, total: steps.length, percent: Math.round((completed / steps.length) * 100), steps };
   }
@@ -71,6 +74,7 @@ export class MerchantsService {
   async update(id: string, input: unknown) {
     const dto = updateMerchantSchema.parse(input);
     const current = await this.findOne(id);
+
     const result = await this.pool.query(
       `UPDATE merchants
          SET name=$2,
@@ -82,6 +86,7 @@ export class MerchantsService {
              test_mode=COALESCE($8, test_mode),
              min_invoice_usdc=COALESCE($9, min_invoice_usdc),
              max_invoice_usdc=COALESCE($10, max_invoice_usdc),
+             unpaid_invoice_ttl_minutes=COALESCE($11, unpaid_invoice_ttl_minutes),
              updated_at=NOW()
        WHERE id=$1
        RETURNING *`,
@@ -96,8 +101,11 @@ export class MerchantsService {
         dto.test_mode ?? null,
         dto.min_invoice_usdc ?? null,
         dto.max_invoice_usdc ?? null,
+        dto.unpaid_invoice_ttl_minutes ?? null,
       ],
     );
+
     return result.rows[0];
   }
 }
+

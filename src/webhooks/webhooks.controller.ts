@@ -37,13 +37,19 @@ export class WebhooksController {
   }
 
   @Get(':id/deliveries')
-  @ApiOperation({ summary: 'Webhook delivery history' })
+  @ApiOperation({ summary: 'List delivery attempts for a webhook' })
   deliveries(@Req() req: any, @Param('id') id: string) {
     return this.webhooks.deliveries(req.user.merchantId, id);
   }
 
+  @Get(':id/deliveries/:deliveryId')
+  @ApiOperation({ summary: 'Get a single delivery attempt by ID' })
+  delivery(@Req() req: any, @Param('id') id: string, @Param('deliveryId') deliveryId: string) {
+    return this.webhooks.deliveryById(req.user.merchantId, id, deliveryId);
+  }
+
   @Post('deliveries/:id/retry')
-  @ApiOperation({ summary: 'Retry failed delivery' })
+  @ApiOperation({ summary: 'Retry a failed or dead delivery' })
   retry(@Req() req: any, @Param('id') id: string) {
     const actorIp = req.ip || req.connection.remoteAddress;
     return this.webhooks.retry(req.user.merchantId, id, actorIp, req.user.email);
